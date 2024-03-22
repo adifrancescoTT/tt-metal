@@ -15,7 +15,7 @@ def _split_query_key_value_and_split_heads_validate_input_tensors(
     ttnn.validate_input_tensor(
         operation_name,
         input_tensor,
-        ranks=(3,),
+        ranks=(3, 4),
         dtypes=(ttnn.bfloat16, ttnn.bfloat8_b),
         layouts=(ttnn.TILE_LAYOUT,),
         can_be_on_device=True,
@@ -24,7 +24,7 @@ def _split_query_key_value_and_split_heads_validate_input_tensors(
     ttnn.validate_input_tensor(
         operation_name,
         kv_input_tensor,
-        ranks=(3,),
+        ranks=(3, 4),
         dtypes=(ttnn.bfloat16, ttnn.bfloat8_b),
         layouts=(ttnn.TILE_LAYOUT,),
         can_be_on_device=True,
@@ -154,6 +154,9 @@ def split_query_key_value_and_split_heads(
         * :attr:`memory_config`: Memory Config of the output tensor
 
     """
+    if len(input_tensor.shape) == 4:
+        input_tensor = ttnn.reshape(input_tensor, (input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]))
+
     if len(input_tensor.shape) != 3:
         raise RuntimeError("Input Tensor must have strictly 3 dimensions!")
 
