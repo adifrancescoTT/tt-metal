@@ -148,6 +148,75 @@ inline void addr_gen_advance_width_sharded(
     }
 }
 
+inline void full_worker_grid_addr_gen_width_sharded_advance_shard_impl(
+    uint16_t &curr_shard_tile_x,
+    uint16_t &curr_shard_tile_y,
+    uint16_t &curr_tile_index,
+    uint16_t &curr_shard,
+    uint16_t const input_shard_num_tiles_x,
+    uint16_t const total_shards_x,
+    bool is_clockwise
+) {
+    bool wrap_around = is_clockwise ? curr_shard == 0 : curr_shard == total_shards_x - 1;
+    curr_shard = wrap_around ?
+        (is_clockwise ? total_shards_x - 1 : 0) :
+        (is_clockwise ? curr_shard - 1 : curr_shard + 1);
+    curr_tile_index = input_shard_num_tiles_x * curr_shard;
+    curr_shard_tile_x = 0;
+    curr_shard_tile_y = 0;
+}
+
+inline void full_worker_grid_addr_gen_width_sharded_advance_full_tile_row(
+    uint16_t &curr_shard_tile_x,
+    uint16_t &curr_shard_tile_y,
+    uint16_t &curr_tile_index,
+    uint16_t &curr_shard,
+    uint16_t const input_shard_num_tiles_x,
+    uint16_t const input_shard_num_tiles_y,
+    uint16_t const total_shards_x,
+    bool is_clockwise) {
+
+    // Keep it verbose for now. we can reduce to a flat index later
+    bool is_last_row = curr_shard_tile_y == input_shard_num_tiles_y - 1;
+    if (is_last_row) {
+        full_worker_grid_addr_gen_width_sharded_advance_shard_impl(
+            curr_shard_tile_x, curr_shard_tile_y, curr_tile_index, curr_shard, input_shard_num_tiles_x, total_shards_x, is_clockwise);
+
+    } else {
+        curr_tile_index += total_shards_x * input_shard_num_tiles_x - curr_shard_tile_x;
+        curr_shard_tile_x = 0;
+        curr_shard_tile_y++;
+    }
+}
+
+inline void full_worker_grid_addr_gen_width_sharded_advance (
+    uint16_t &curr_shard_tile_x,
+    uint16_t &curr_shard_tile_y,
+    uint16_t &curr_tile_index,
+    uint16_t &curr_shard,
+    uint16_t const input_shard_num_tiles_x,
+    uint16_t const input_shard_num_tiles_y,
+    uint16_t const total_shards_x,
+    bool is_clockwise) {
+
+    // Keep it verbose for now. we can reduce to a flat index later
+    bool last_tile_in_row = curr_shard_tile_x == input_shard_num_tiles_x - 1;
+    bool last_tile_in_col = curr_shard_tile_y == input_shard_num_tiles_y - 1;
+    if (last_tile_in_row && last_tile_in_col) {
+        full_worker_grid_addr_gen_width_sharded_advance_shard_impl(
+            curr_shard_tile_x, curr_shard_tile_y, curr_tile_index, curr_shard, input_shard_num_tiles_x, total_shards_x, is_clockwise);
+
+    } else if (last_tile_in_row) {
+        curr_tile_index += total_shards_x * input_shard_num_tiles_x - curr_shard_tile_x;
+        curr_shard_tile_x = 0;
+        curr_shard_tile_y++;
+    } else {
+        curr_shard_tile_x++;
+        curr_tile_index++;
+    }
+}
+
+
 }; // namespace all_gather
 
 }  // namespace ccl
