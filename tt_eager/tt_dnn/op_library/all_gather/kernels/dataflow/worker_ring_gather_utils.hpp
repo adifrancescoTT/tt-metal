@@ -10,19 +10,19 @@
 using ccl::ShardType;
 
 FORCE_INLINE void validate_sane_transaction_counters() {
-    // ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_WR_ACK_RECEIVED) != 0);
-    // ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_NONPOSTED_WR_REQ_SENT) != 0);
-    // ASSERT(noc_nonposted_writes_num_issued[noc_index] != 0);
-    // ASSERT(noc_nonposted_writes_acked[noc_index] != 0);
-    // ASSERT(noc_reads_num_issued[noc_index] != 0);
+    ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_WR_ACK_RECEIVED) != 0);
+    ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_NONPOSTED_WR_REQ_SENT) != 0);
+    ASSERT(noc_nonposted_writes_num_issued[noc_index] != 0);
+    ASSERT(noc_nonposted_writes_acked[noc_index] != 0);
+    ASSERT(noc_reads_num_issued[noc_index] != 0);
 }
 
 FORCE_INLINE void validate_sane_transaction_counters_rw() {
-    // ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_WR_ACK_RECEIVED) != 0);
-    // ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_NONPOSTED_WR_REQ_SENT) != 0);
-    // ASSERT(noc_nonposted_writes_num_issued[noc_index] != 0);
-    // ASSERT(noc_nonposted_writes_acked[noc_index] != 0);
-    // ASSERT(noc_reads_num_issued[noc_index] != 0);
+    ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_WR_ACK_RECEIVED) != 0);
+    ASSERT (NOC_STATUS_READ_REG(noc_index, NIU_MST_NONPOSTED_WR_REQ_SENT) != 0);
+    ASSERT(noc_nonposted_writes_num_issued[noc_index] != 0);
+    ASSERT(noc_nonposted_writes_acked[noc_index] != 0);
+    ASSERT(noc_reads_num_issued[noc_index] != 0);
 }
 
 
@@ -207,11 +207,11 @@ FORCE_INLINE void send_chunk(
     cb_pop_front(cb_id, num_pages);
 }
 FORCE_INLINE void send_chunk_sharded(
-    const uint32_t& cb_id, const uint32_t& num_pages, const uint32_t& page_size, uint64_t remote_l1_write_addr) {
+    const uint32_t& cb_id, const uint32_t& num_pages, const uint32_t& page_size, uint64_t remote_l1_write_addr, uint64_t eth_l1_sender_semaphore_addr) {
     cb_wait_front(cb_id, num_pages);
     uint32_t l1_read_addr = get_read_ptr(cb_id);
     noc_async_write(l1_read_addr, remote_l1_write_addr, page_size * num_pages);
-    // TODO: insert eth semaphore inc here
+    noc_semaphore_inc(eth_l1_sender_semaphore_addr, 1);
     validate_sane_transaction_counters();
     noc_async_write_barrier();
     cb_pop_front(cb_id, num_pages);
@@ -219,12 +219,12 @@ FORCE_INLINE void send_chunk_sharded(
 
 template <ShardType T>
 FORCE_INLINE void write_and_send_chunk_sharded(
-    const uint32_t& cb_id, ShardAddrGen<T>& addr_gen, uint32_t const num_pages, uint64_t remote_eth_l1_write_addr) {
+    const uint32_t& cb_id, ShardAddrGen<T>& addr_gen, uint32_t const num_pages, uint64_t remote_eth_l1_write_addr, uint64_t eth_l1_sender_semaphore_addr) {
     cb_wait_front(cb_id, num_pages);
     uint32_t l1_read_addr = get_read_ptr(cb_id);
     uint32_t num_pages_remaining = num_pages;
     noc_async_write(l1_read_addr, remote_eth_l1_write_addr, num_pages * addr_gen.get_shard_size_in_bytes());
-    // TODO: insert eth semaphore inc here
+    noc_semaphore_inc(eth_l1_sender_semaphore_addr, 1);
     while (num_pages_remaining > 0) {
         uint64_t dest_worker_noc_addr = addr_gen.get_next_noc_addr();
         uint32_t num_shards_to_write = std::min<uint32_t>(num_pages_remaining, addr_gen.contiguous_chunks_before_stride);

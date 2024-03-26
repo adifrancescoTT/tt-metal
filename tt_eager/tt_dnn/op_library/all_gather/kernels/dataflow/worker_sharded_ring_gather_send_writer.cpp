@@ -45,8 +45,7 @@ void kernel_main() {
         uint32_t num_shards_to_send = std::min(shards_per_eth_l1_buffer, num_input_shards_from_local_ring_index - i);
         noc_semaphore_wait(writer_send_semaphore_addr_ptr, 1);
         noc_semaphore_set(writer_send_semaphore_addr_ptr, 0);
-        write_and_send_chunk_sharded(cb_id_in0, addr_gen, num_shards_to_send, eth_l1_sender_base_noc_addr);
-        noc_semaphore_inc(eth_l1_sender_semaphore_addr, 1);
+        write_and_send_chunk_sharded(cb_id_in0, addr_gen, num_shards_to_send, eth_l1_sender_base_noc_addr, eth_l1_sender_semaphore_addr);
         if (half_cb_n_shards - num_shards_to_send) {
             pop_filler_pages_from_cb(cb_id_in0, half_cb_n_shards - num_shards_to_send);
         }
@@ -58,11 +57,10 @@ void kernel_main() {
             uint32_t num_shards_to_send = std::min(shards_per_eth_l1_buffer, num_input_shards_from_local_ring_index - i);
             noc_semaphore_wait(writer_send_semaphore_addr_ptr, 1);
             noc_semaphore_set(writer_send_semaphore_addr_ptr, 0);
-            send_chunk_sharded(cb_id_in0, num_shards_to_send, shard_size, eth_l1_sender_base_noc_addr);
+            send_chunk_sharded(cb_id_in0, num_shards_to_send, shard_size, eth_l1_sender_base_noc_addr, eth_l1_sender_semaphore_addr);
             if (half_cb_n_shards - num_shards_to_send) {
                 pop_filler_pages_from_cb(cb_id_in0, half_cb_n_shards - num_input_shards_from_local_ring_index);
             }
-            noc_semaphore_inc(eth_l1_sender_semaphore_addr, 1);
         }
     }
 }
