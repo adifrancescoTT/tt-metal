@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include "impl/buffers/buffer.hpp"
 #include "tensor/tensor.hpp"
 #include "tt_dnn/op_library/ccl/shared_with_host/hetergeneous_data_structs.hpp"
 #include "tt_metal/common/constants.hpp"
@@ -16,6 +17,11 @@ namespace tt {
 
 namespace tt_metal {
 
+enum AllGatherMode {
+    RING_INTERLEAVED,
+    FULL_WORKER_GRID_SHARDED,
+    SINGLE_TILE_HIGH_WIDTH_SHARDED
+};
 
 class AllGatherConfig {
    public:
@@ -28,11 +34,22 @@ class AllGatherConfig {
         enable_bidirectional(dim != 0 && dim != 1),
 
         input_is_dram(input_tensor.buffer()->buffer_type() == BufferType::DRAM),
-        output_is_dram(output_tensor.buffer()->buffer_type() == BufferType::DRAM)
+        output_is_dram(output_tensor.buffer()->buffer_type() == BufferType::DRAM),
+
+        mode(AllGatherMode::RING_INTERLEAVED)
     {
         constexpr uint32_t total_l1_buffer_space = eth_l1_mem::address_map::MAX_L1_LOADING_SIZE - eth_l1_mem::address_map::ERISC_L1_UNRESERVED_BASE;
 
         this->is_sharded = input_tensor.is_sharded();
+        if (this->is_sharded) {
+            if (input_tensor.buffer()->shard_spec().tensor2d_shape[0] > 1) {
+                this->mode = AllGatherMode::FULL_WORKER_GRID_SHARDED;
+            } else {
+                this->mode = AllGatherMode::SINGLE_TILE_HIGH_WIDTH_SHARDED;
+            }
+        }
+
+
         this->num_buffers = (this->enable_bidirectional ? 8 : (this->is_sharded ? 8 : 4));
         if (this->is_sharded) {
             this->num_buffers = std::min(this->num_buffers, input_tensor.shard_spec()->num_cores());
@@ -125,6 +142,7 @@ class AllGatherConfig {
     uint32_t semaphore_offset;
     uint32_t eth_buffers_l1_base_byte_address;
     uint32_t eth_sems_l1_base_byte_address;
+    AllGatherMode mode;
     bool is_sharded;
     const bool enable_bidirectional;
     const bool input_is_dram;
