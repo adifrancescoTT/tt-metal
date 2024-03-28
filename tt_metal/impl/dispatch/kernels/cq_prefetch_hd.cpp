@@ -324,6 +324,7 @@ uint32_t process_relay_paged_cmd(uint32_t cmd_ptr) {
     uint32_t scratch_read_addr = scratch_db_top[0];
     uint32_t amt_to_read = (scratch_db_half_size > read_length) ? read_length : scratch_db_half_size;
     uint32_t amt_read = 0;
+    DPRINT << "PREFETCH read " << HEX() << base_addr << ENDL();
     while (amt_to_read >= page_size) {
         uint64_t noc_addr = addr_gen.get_noc_addr(page_id); // XXXX replace this w/ walking the banks to save mul on GS
         noc_async_read(noc_addr, scratch_read_addr, page_size);

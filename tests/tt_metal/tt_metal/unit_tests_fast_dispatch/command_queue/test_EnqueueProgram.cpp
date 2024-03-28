@@ -241,8 +241,9 @@ bool test_dummy_EnqueueProgram_with_runtime_args(Device* device, CommandQueue& c
     for (uint32_t i = 0; i < num_iterations; i++) {
         EnqueueProgram(cq, program, false);
     }
-    Finish(cq);
+    //    Finish(cq);
 
+    sleep(3);
     for (const CoreRange& core_range : program_config.cr_set.ranges()) {
         CoresInCoreRangeGenerator core_range_generator(core_range, device->compute_with_storage_grid_size());
 
@@ -252,9 +253,19 @@ bool test_dummy_EnqueueProgram_with_runtime_args(Device* device, CommandQueue& c
             terminate = terminate_;
 
             vector<uint32_t> dummy_kernel0_args_readback;
+            std::cout << " checking core " << device->worker_core_from_logical_core(core_coord).str() << " 0x"
+                      << std::hex << BRISC_L1_ARG_BASE << std::endl;
+            std::cout << " expected: ";
+            for (const auto& val : dummy_kernel0_args) {
+                std::cout << val << ", ";
+            }
             tt::tt_metal::detail::ReadFromDeviceL1(
                 device, core_coord, BRISC_L1_ARG_BASE, dummy_kernel0_args.size() * sizeof(uint32_t), dummy_kernel0_args_readback);
             pass &= (dummy_kernel0_args == dummy_kernel0_args_readback);
+            std::cout << " got: ";
+            for (const auto& val : dummy_kernel0_args_readback) {
+                std::cout << val << ", ";
+            }
 
             vector<uint32_t> dummy_kernel1_args_readback;
             tt::tt_metal::detail::ReadFromDeviceL1(
@@ -506,7 +517,8 @@ TEST_F(CommandQueueSingleCardFixture, TestRuntimeArgsCorrectlySentSingleCore) {
 
     DummyProgramConfig dummy_program_config = {.cr_set = cr_set};
     for (Device *device : devices_) {
-        local_test_functions::test_dummy_EnqueueProgram_with_runtime_args(device, device->command_queue(), dummy_program_config, 9, 12, 1);
+        EXPECT_TRUE(local_test_functions::test_dummy_EnqueueProgram_with_runtime_args(
+            device, device->command_queue(), dummy_program_config, 9, 12, 1));
     }
 }
 

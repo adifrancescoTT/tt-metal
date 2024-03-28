@@ -1007,9 +1007,290 @@ ProgramDeviceMap ConstructProgramDeviceMap(const Device* device, Program& progra
     };
 }
 
-void Program::compile( Device * device )
-{
+void Program::populate_dispatch_data(Device* device) {
+    static const map<RISCV, uint32_t> processor_to_local_mem_addr = {
+        {RISCV::BRISC, MEM_BRISC_INIT_LOCAL_L1_BASE},
+        {RISCV::NCRISC, MEM_NCRISC_INIT_LOCAL_L1_BASE},
+        {RISCV::TRISC0, MEM_TRISC0_INIT_LOCAL_L1_BASE},
+        {RISCV::TRISC1, MEM_TRISC1_INIT_LOCAL_L1_BASE},
+        {RISCV::TRISC2, MEM_TRISC2_INIT_LOCAL_L1_BASE},
+        {RISCV::ERISC, eth_l1_mem::address_map::FIRMWARE_BASE}};
+
+    static const map<RISCV, uint32_t> processor_to_l1_arg_base_addr = {
+        {RISCV::BRISC, BRISC_L1_ARG_BASE},
+        {RISCV::NCRISC, NCRISC_L1_ARG_BASE},
+        {RISCV::COMPUTE, TRISC_L1_ARG_BASE},
+        {RISCV::ERISC, eth_l1_mem::address_map::ERISC_L1_ARG_BASE},
+    };
+
+    constexpr static uint32_t noc_transfer_alignment_in_bytes = 16;
+    auto extract_dst_noc_multicast_info =
+        [&device](const set<CoreRange>& ranges, const CoreType core_type) -> vector<pair<uint32_t, uint32_t>> {
+        // This API extracts all the pairs of noc multicast encodings given a set of core ranges
+        vector<pair<uint32_t, uint32_t>> dst_noc_multicast_info;
+        for (const CoreRange& core_range : ranges) {
+            CoreCoord physical_start = device->physical_core_from_logical_core(core_range.start, core_type);
+            CoreCoord physical_end = device->physical_core_from_logical_core(core_range.end, core_type);
+
+            uint32_t dst_noc_multicast_encoding =
+                NOC_MULTICAST_ENCODING(physical_start.x, physical_start.y, physical_end.x, physical_end.y);
+
+            uint32_t num_receivers = core_range.size();
+            dst_noc_multicast_info.push_back(std::make_pair(dst_noc_multicast_encoding, num_receivers));
+        }
+        return dst_noc_multicast_info;
+    };
+
+    auto extract_dst_noc_unicast_info =
+        [&device](const set<CoreRange>& ranges, const CoreType core_type) -> vector<pair<uint32_t, uint32_t>> {
+        // This API extracts all the pairs of noc multicast encodings given a set of core ranges
+        vector<pair<uint32_t, uint32_t>> dst_noc_unicast_info;
+        for (const CoreRange& core_range : ranges) {
+            for (auto x = core_range.start.x; x <= core_range.end.x; x++) {
+                for (auto y = core_range.start.y; y <= core_range.end.y; y++) {
+                    CoreCoord physical_coord = device->physical_core_from_logical_core(CoreCoord({x, y}), core_type);
+                    uint32_t dst_noc_unicast_encoding =
+                        NOC_XY_ENCODING(NOC_X(physical_coord.x), NOC_Y(physical_coord.y));
+                    dst_noc_unicast_info.push_back(std::make_pair(dst_noc_unicast_encoding, /*num_mcast_dests=*/0));
+                }
+            }
+        }
+        return dst_noc_unicast_info;
+    };
+
+    // Runtime Args
+    // TODO: add multicasting
+    for (size_t kernel_id = 0; kernel_id < this->num_kernels(); kernel_id++) {
+        auto kernel = detail::GetKernel(*this, kernel_id);
+
+        uint32_t dst = processor_to_l1_arg_base_addr.at(kernel->processor());
+
+        for (const auto& core_coord : kernel->cores_with_runtime_args()) {
+            CoreCoord physical_core =
+                device->physical_core_from_logical_core(core_coord, kernel->get_kernel_core_type());
+            const auto& runtime_args_data = kernel->runtime_args(core_coord);
+            vector<pair<uint32_t, uint32_t>> dst_noc_unicast_info = extract_dst_noc_unicast_info(
+                detail::GetCoreRangeSet(core_coord).ranges(), kernel->get_kernel_core_type());
+
+            transfer_info_2 transfer_info = {
+                .dst_base_addr = dst, .dst_noc_info = dst_noc_unicast_info, .linked = false, .data = runtime_args_data};
+            this->program_transfer_info.runtime_args[dst].push_back(transfer_info);
+        }
+    }
+    // Semaphores
+    for (const Semaphore& semaphore : this->semaphores()) {
+        // TODO: use semaphore.core_type from main
+        vector<pair<uint32_t, uint32_t>> dst_noc_multicast_info =
+            extract_dst_noc_multicast_info(semaphore.core_range_set().ranges(), CoreType::WORKER);
+
+        vector<uint32_t> semaphore_data(L1_ALIGNMENT / sizeof(uint32_t), 0);
+        semaphore_data[0] = semaphore.initial_value();
+
+        transfer_info_2 transfer_info = {
+            .dst_base_addr = semaphore.address(),
+            .dst_noc_info = dst_noc_multicast_info,
+            .linked = false,
+            .data = semaphore_data};
+        this->program_transfer_info.semaphores[semaphore.address()].push_back(transfer_info);
+    }
+
+    // Circular Buffer Configs
+    for (const shared_ptr<CircularBuffer>& cb : this->circular_buffers()) {
+        // No CB support for ethernet cores
+        vector<pair<uint32_t, uint32_t>> dst_noc_multicast_info =
+            extract_dst_noc_multicast_info(cb->core_ranges().ranges(), CoreType::WORKER);
+
+        std::vector<uint32_t> cb_data(UINT32_WORDS_PER_CIRCULAR_BUFFER_CONFIG);
+        for (const auto buffer_index : cb->buffer_indices()) {
+            cb_data = {
+                cb->address() >> 4,
+                cb->size() >> 4,
+                cb->num_pages(buffer_index),
+                cb->size() / cb->num_pages(buffer_index) >> 4};
+
+            std::uint32_t dst =
+                CIRCULAR_BUFFER_CONFIG_BASE + buffer_index * UINT32_WORDS_PER_CIRCULAR_BUFFER_CONFIG * sizeof(uint32_t);
+            transfer_info_2 transfer_info = {
+                .dst_base_addr = dst, .dst_noc_info = dst_noc_multicast_info, .linked = false, .data = cb_data};
+            this->program_transfer_info.cb_configs.push_back(transfer_info);
+        }
+    }
+
+    // Assume here and in command queue that kg_buffers is populated with multicast buffers first then unicast buffers
+    // Program Binaries and Go Signals
+    // TODO: cleanup put the WORKERS and ETH logic together..
+    for (KernelGroup& kernel_group : this->get_kernel_groups(CoreType::WORKER)) {
+        vector<pair<uint32_t, uint32_t>> dst_noc_multicast_info =
+            extract_dst_noc_multicast_info(kernel_group.core_ranges.ranges(), kernel_group.get_core_type());
+
+        kernel_group.launch_msg.mode = DISPATCH_MODE_DEV;
+        vector<uint32_t> go_signals_data(sizeof(launch_msg_t) / sizeof(uint32_t));
+        uint32_t* launch_message_data = (uint32_t*)&kernel_group.launch_msg;
+        for (int i = 0; i < sizeof(launch_msg_t) / sizeof(uint32_t); i++) {
+            go_signals_data[i] = launch_message_data[i];
+        }
+        transfer_info_2 transfer_info = {
+            .dst_base_addr = GET_MAILBOX_ADDRESS_HOST(launch),
+            .dst_noc_info = dst_noc_multicast_info,
+            .linked = false,
+            .data = go_signals_data};
+        this->program_transfer_info.go_signals.push_back(transfer_info);
+
+        // So far, we don't support linking optimizations for kernel groups
+        // which use multiple core ranges
+        bool linked = dst_noc_multicast_info.size() == 1;
+        vector<KernelHandle> kernel_ids;
+        if (kernel_group.riscv0_id)
+            kernel_ids.push_back(kernel_group.riscv0_id.value());
+        if (kernel_group.riscv1_id)
+            kernel_ids.push_back(kernel_group.riscv1_id.value());
+        if (kernel_group.compute_id)
+            kernel_ids.push_back(kernel_group.compute_id.value());
+        for (size_t i = 0; i < kernel_ids.size(); i++) {
+            KernelHandle kernel_id = kernel_ids[i];
+            vector<RISCV> sub_kernels;
+            std::shared_ptr<Kernel> kernel = detail::GetKernel(*this, kernel_id);
+            if (kernel->processor() == RISCV::COMPUTE) {
+                sub_kernels = {RISCV::TRISC0, RISCV::TRISC1, RISCV::TRISC2};
+            } else {
+                sub_kernels = {kernel->processor()};
+            }
+
+            uint32_t sub_kernel_index = 0;
+            const auto& binaries = kernel->binaries(device->id());
+
+            std::vector<uint32_t> dst_base_addrs(binaries.size());
+            std::vector<uint32_t> page_offsets(binaries.size());
+            std::vector<uint32_t> lengths(binaries.size());
+            vector<uint32_t> binaries_data;
+            for (size_t j = 0; j < binaries.size(); j++) {
+                const ll_api::memory& kernel_bin = binaries[j];
+
+                uint32_t k = 0;
+                uint32_t num_spans = kernel_bin.num_spans();
+                kernel_bin.process_spans([&](vector<uint32_t>::const_iterator mem_ptr, uint64_t dst, uint32_t len) {
+                    linked &= (i != kernel_ids.size() - 1) or (j != binaries.size() - 1) or (k != num_spans - 1);
+                    uint64_t relo_addr =
+                        tt::llrt::relocate_dev_addr(dst, processor_to_local_mem_addr.at(sub_kernels[sub_kernel_index]));
+
+                    dst_base_addrs[j] = (uint32_t)relo_addr;
+                    page_offsets[j] = binaries_data.size() * sizeof(uint32_t) / DeviceCommand::PROGRAM_PAGE_SIZE;
+                    lengths[j] = len * sizeof(uint32_t);
+
+                    binaries_data.resize(binaries_data.size() + len);
+                    std::copy(mem_ptr, mem_ptr + len, binaries_data.end() - len);
+                    binaries_data.resize(
+                        align(binaries_data.size(), DeviceCommand::PROGRAM_PAGE_SIZE / sizeof(uint32_t)), 0);
+
+                    kernel_bins_transfer_info kernel_bins_transfer_info = {
+                        .dst_base_addrs = dst_base_addrs,
+                        .page_offsets = page_offsets,
+                        .lengths = lengths,
+                        .dst_noc_info = dst_noc_multicast_info,
+                        .linked = false,
+                        .data = binaries_data};
+                    this->program_transfer_info.kernel_bins.push_back(kernel_bins_transfer_info);
+
+                    this->kg_buffers.push_back(std::make_unique<Buffer>(
+                        device,
+                        binaries_data.size() * sizeof(uint32_t),
+                        DeviceCommand::PROGRAM_PAGE_SIZE,
+                        BufferType::DRAM));
+
+                    k++;
+                });
+                sub_kernel_index++;
+            }
+        }
+    }
+    for (KernelGroup& kernel_group : this->get_kernel_groups(CoreType::ETH)) {
+        vector<pair<uint32_t, uint32_t>> dst_noc_unicast_info =
+            extract_dst_noc_unicast_info(kernel_group.core_ranges.ranges(), kernel_group.get_core_type());
+
+        kernel_group.launch_msg.mode = DISPATCH_MODE_DEV;
+        vector<uint32_t> go_signals_data(sizeof(launch_msg_t) / sizeof(uint32_t));
+        uint32_t* launch_message_data = (uint32_t*)&kernel_group.launch_msg;
+        for (int i = 0; i < sizeof(launch_msg_t) / sizeof(uint32_t); i++) {
+            go_signals_data[i] = launch_message_data[i];
+        }
+        transfer_info_2 transfer_info = {
+            .dst_base_addr = GET_ETH_MAILBOX_ADDRESS_HOST(launch),
+            .dst_noc_info = dst_noc_unicast_info,
+            .linked = false,
+            .data = go_signals_data};
+        this->program_transfer_info.go_signals.push_back(transfer_info);
+
+        vector<KernelHandle> kernel_ids;
+        if (kernel_group.erisc_id)
+            kernel_ids.push_back(kernel_group.erisc_id.value());
+        for (size_t i = 0; i < kernel_ids.size(); i++) {
+            KernelHandle kernel_id = kernel_ids[i];
+            vector<RISCV> sub_kernels;
+            std::shared_ptr<Kernel> kernel = detail::GetKernel(*this, kernel_id);
+            if (kernel->processor() == RISCV::COMPUTE) {
+                sub_kernels = {RISCV::TRISC0, RISCV::TRISC1, RISCV::TRISC2};
+            } else {
+                sub_kernels = {kernel->processor()};
+            }
+
+            uint32_t sub_kernel_index = 0;
+            const auto& binaries = kernel->binaries(device->id());
+            std::vector<uint32_t> dst_base_addrs(binaries.size());
+            std::vector<uint32_t> page_offsets(binaries.size());
+            std::vector<uint32_t> lengths(binaries.size());
+            vector<uint32_t> binaries_data;
+            for (size_t j = 0; j < binaries.size(); j++) {
+                const ll_api::memory& kernel_bin = binaries[j];
+
+                uint32_t k = 0;
+                uint32_t num_spans = kernel_bin.num_spans();
+                kernel_bin.process_spans([&](vector<uint32_t>::const_iterator mem_ptr, uint64_t dst, uint32_t len) {
+                    uint64_t relo_addr =
+                        tt::llrt::relocate_dev_addr(dst, processor_to_local_mem_addr.at(sub_kernels[sub_kernel_index]));
+
+                    dst_base_addrs[j] = (uint32_t)relo_addr;
+                    page_offsets[j] = binaries_data.size() * sizeof(uint32_t) / DeviceCommand::PROGRAM_PAGE_SIZE;
+                    lengths[j] = len * sizeof(uint32_t);
+
+                    binaries_data.resize(binaries_data.size() + len);
+                    std::copy(mem_ptr, mem_ptr + len, binaries_data.end() - len);
+                    binaries_data.resize(
+                        align(binaries_data.size(), DeviceCommand::PROGRAM_PAGE_SIZE / sizeof(uint32_t)), 0);
+
+                    kernel_bins_transfer_info kernel_bins_transfer_info = {
+                        .dst_base_addrs = dst_base_addrs,
+                        .page_offsets = page_offsets,
+                        .lengths = lengths,
+                        .dst_noc_info = dst_noc_unicast_info,
+                        .linked = false,
+                        .data = binaries_data};
+                    this->program_transfer_info.kernel_bins.push_back(kernel_bins_transfer_info);
+
+                    this->kg_buffers.push_back(std::make_unique<Buffer>(
+                        device,
+                        binaries_data.size() * sizeof(uint32_t),
+                        DeviceCommand::PROGRAM_PAGE_SIZE,
+                        BufferType::DRAM));
+
+                    k++;
+                });
+                sub_kernel_index++;
+            }
+        }
+    }
+    std::uint32_t num_active_cores = 0;
+    num_active_cores += this->logical_cores().at(CoreType::WORKER).size();
+    num_active_cores += this->logical_cores().at(CoreType::ETH).size();
+    this->program_transfer_info.num_active_cores = num_active_cores;
+
+    return;
+}
+
+void Program::compile(Device* device) {
     bool first_compile_on_device = compile_needed_.find(device->id()) == compile_needed_.end();
+    for (const auto& [id, data] : compile_needed_) {
+        std::cout << id << std::endl;
+    }
     if (not first_compile_on_device and (not compile_needed_.at(device->id()))) {
         return;
     }
@@ -1027,9 +1308,9 @@ void Program::compile( Device * device )
     DprintServerSetProfilerState(profile_kernel);
 
     // compile all kernels in parallel
-    for (auto &[core_type, kernels] : kernels_) {
-       for (auto &[id, kernel]: kernels) {
-            events.emplace_back ( detail::async ( [kernel, device, this] {
+    for (auto& [core_type, kernels] : kernels_) {
+        for (auto& [id, kernel] : kernels) {
+            events.emplace_back(detail::async([kernel, device, this] {
                 ZoneScoped;
 
                 JitBuildOptions build_options(device->build_env());
@@ -1043,9 +1324,10 @@ void Program::compile( Device * device )
 
                 bool cache_hit = true;
                 bool path_exists = std::filesystem::exists(build_options.path);
-                if ( enable_persistent_kernel_cache && path_exists ) {
-                    if ( not detail::HashLookup::inst().exists(kernel_hash) ) detail::HashLookup::inst().add(kernel_hash);
-                } else if ( detail::HashLookup::inst().add(kernel_hash) ) {
+                if (enable_persistent_kernel_cache && path_exists) {
+                    if (not detail::HashLookup::inst().exists(kernel_hash))
+                        detail::HashLookup::inst().add(kernel_hash);
+                } else if (detail::HashLookup::inst().add(kernel_hash)) {
                     cache_hit = false;
                     GenerateBinaries(device, build_options, kernel);
                 }
@@ -1054,27 +1336,27 @@ void Program::compile( Device * device )
                 }
 
                 kernel->set_binary_path(build_options.path);
-        } ) );
-       }
-    }
-
-    for (auto & f : events)
-        f.get();
-
-    for (auto &[core_type, kernels] : kernels_) {
-        for (auto &[id, kernel] : kernels) {
-            events.emplace_back ( detail::async ( [kernel, device] { kernel->read_binaries(device); }));
+            }));
         }
     }
 
-    for (auto & f : events)
-        f.get();
+    for (auto& f : events) f.get();
+
+    for (auto& [core_type, kernels] : kernels_) {
+        for (auto& [id, kernel] : kernels) {
+            events.emplace_back(detail::async([kernel, device] { kernel->read_binaries(device); }));
+        }
+    }
+
+    for (auto& f : events) f.get();
 
     this->construct_core_range_set_for_worker_cores();
 
     if (std::getenv("TT_METAL_SLOW_DISPATCH_MODE") == nullptr) {
         this->program_device_map = ConstructProgramDeviceMap(device, *this);
-        this->buffer = std::make_unique<Buffer>(device, this->program_device_map.program_pages.size() * sizeof(uint32_t),  DeviceCommand::PROGRAM_PAGE_SIZE, BufferType::DRAM);
+        this->populate_dispatch_data(device);  // TODO: maybe rename
+        // this->buffer = std::make_unique<Buffer>(device, 512* sizeof(uint32_t),  DeviceCommand::PROGRAM_PAGE_SIZE,
+        // BufferType::DRAM);
     }
 
     if (detail::CompilationReporter::enabled()) {

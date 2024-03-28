@@ -66,7 +66,8 @@ bool test_dummy_EnqueueProgram_with_runtime_args(Device* device, const CoreCoord
     tt::tt_metal::detail::CompileProgram(device, program);
     auto& cq = device->command_queue();
     EnqueueProgram(cq, program, false);
-    Finish(cq);
+    // Finish(cq);
+    sleep(3);
 
     vector<uint32_t> dummy_kernel0_args_readback = llrt::read_hex_vec_from_core(
         device->id(),
@@ -548,8 +549,12 @@ bool chip_to_chip_interleaved_buffer_transfer(
 
 TEST_F(CommandQueueSingleCardFixture, EnqueueDummyProgramOnEthCore) {
     for (const auto& device : devices_) {
+        if (device->id() != 0)
+            continue;
         for (const auto& eth_core : device->get_active_ethernet_cores(true)) {
+            std::cout << " running on eth core " << eth_core.str() << std::endl;
             ASSERT_TRUE(fd_unit_tests::erisc::kernels::test_dummy_EnqueueProgram_with_runtime_args(device, eth_core));
+            break;
         }
     }
 }

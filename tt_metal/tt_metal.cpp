@@ -604,6 +604,7 @@ void CloseDevices(std::map<chip_id_t, Device *> devices) {
 
     void CompileProgram(Device *device, Program &program){
         ZoneScoped;
+        std::cout << " calling CompileProgram " << std::endl;
         program.compile(device);
     }
 

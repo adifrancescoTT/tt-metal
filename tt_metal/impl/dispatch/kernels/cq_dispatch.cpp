@@ -270,7 +270,13 @@ void process_write_linear(uint32_t num_mcast_dests) {
     uint32_t dst_addr = cmd->write_linear.addr;
     uint32_t length = cmd->write_linear.length;
     uint32_t data_ptr = cmd_ptr + sizeof(CQDispatchCmd);
-    DPRINT << "dispatch_write: " << length << " num_mcast_dests: " << num_mcast_dests << ENDL();
+    DPRINT << "dispatch_write: " << length << " num_mcast_dests: " << num_mcast_dests << " dest " << HEX() << dst_addr
+           << ENDL();
+    DPRINT << "DISPATCH: writing data: " << ENDL();
+    DPRINT << *(uint32_t *)data_ptr << ENDL();
+    DPRINT << HEX() << *((uint32_t *)data_ptr + 1) << ENDL();
+    DPRINT << HEX() << *((uint32_t *)data_ptr + 2) << ENDL();
+    DPRINT << HEX() << *((uint32_t *)data_ptr + 3) << ENDL();
     while (length != 0) {
         uint32_t xfer_size = (length > dispatch_cb_page_size) ? dispatch_cb_page_size : length;
         uint64_t dst = get_noc_addr_helper(dst_noc, dst_addr);
@@ -333,6 +339,8 @@ void process_write() {
     } else {
         process_write_linear<true>(num_mcast_dests);
     }
+    // TODO: remove this when I add wait cmd before signals
+    noc_async_write_barrier();
 }
 
 template<bool is_dram>
@@ -437,7 +445,8 @@ void process_write_packed() {
     data_ptr = (data_ptr + L1_ALIGNMENT - 1) & ~(L1_ALIGNMENT - 1);
     uint32_t stride = (xfer_size + L1_ALIGNMENT - 1) & ~(L1_ALIGNMENT - 1);
 
-    DPRINT << "dispatch_write_packed: " << xfer_size << " " << stride << " " << data_ptr << " " << count << ENDL();
+    DPRINT << "dispatch_write_packed: " << xfer_size << " " << stride << " " << data_ptr << " " << count << " "
+           << dst_addr << ENDL();
     while (count != 0) {
         uint32_t dst_noc = sub_cmd_ptr->noc_xy_addr;
         uint32_t num_dests = mcast ?
@@ -548,6 +557,7 @@ static void process_wait() {
     DEBUG_STATUS('P', 'W', 'W');
     volatile tt_l1_ptr uint32_t* sem_addr =
         reinterpret_cast<volatile tt_l1_ptr uint32_t*>(addr);
+    DPRINT << " WAITING FOR " << (uint32_t)sem_addr << " " << count << " seeing " << *sem_addr << ENDL();
     while (*sem_addr < count); // XXXXX use a wrapping compare
     DEBUG_STATUS('P', 'W', 'D');
 
@@ -598,7 +608,7 @@ void kernel_main() {
         switch (cmd->base.cmd_id) {
         case CQ_DISPATCH_CMD_WRITE_LINEAR:
             DEBUG_STATUS('D', 'W', 'B');
-            DPRINT << "cmd_write\n";
+            DPRINT << "DISPATCHER cmd_write\n";
             process_write();
             DEBUG_STATUS('D', 'W', 'D');
             break;

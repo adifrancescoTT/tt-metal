@@ -110,13 +110,19 @@ class Program {
     void allocate_circular_buffers();
 
    private:
+    void populate_dispatch_data(Device *device);
+
     // Buffers temporarily owned by the program
     std::vector<std::shared_ptr<Buffer>> owned_buffer_pool = {};
 
+    // TODO: AL Delete
     ProgramDeviceMap program_device_map;
 
     // The buffer that holds the kernel/binaries/etc for this program
+    // TODO: AL Delete
+    std::vector<std::unique_ptr<Buffer>> kg_buffers;
     std::unique_ptr<Buffer> buffer;
+    ProgramTransferInfo program_transfer_info;
 
     bool loaded_onto_device;
     struct CircularBufferAllocator {

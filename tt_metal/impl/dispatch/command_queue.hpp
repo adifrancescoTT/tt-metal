@@ -244,6 +244,7 @@ class EnqueueProgramCommand : public Command {
     SystemMemoryManager& manager;
     bool stall;
     CoreType dispatch_core_type;
+    static std::vector<uint32_t> commands;
     std::optional<std::reference_wrapper<Trace>> trace = {};
 
    public:
