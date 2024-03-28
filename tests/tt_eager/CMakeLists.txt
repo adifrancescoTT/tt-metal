@@ -48,40 +48,11 @@ set(TT_EAGER_TESTS_INTEGRATION
 )
 
 set(EAGER_TEST_TARGETS "")
+include(helper_functions.cmake)
 
-function(CREATE_EXEC TESTLIST)
-    foreach (TEST_SRC ${TESTLIST})
-        get_filename_component(TEST_NAME ${TEST_SRC} NAME)
-        get_filename_component(TEST_DIR ${TEST_SRC} DIRECTORY)
-        set(TEST_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/${TEST_SRC})
-        # unit_tests and tensor are already taken as target names/executables
-        if(${TEST_NAME} STREQUAL "unit_tests")
-            set(TEST_TARGET "test_unit_tests")
-        elseif(${TEST_NAME} STREQUAL "tensor")
-            set(TEST_TARGET "test_tensor")
-        else()
-            set(TEST_TARGET ${TEST_NAME})
-        endif()
-        add_executable(${TEST_TARGET} ${TEST_SRC_PATH})
-
-        target_link_libraries(${TEST_TARGET} PUBLIC tt_dnn tensor queue stdc++fs yaml-cpp gtest gtest_main m)
-        target_include_directories(${TEST_TARGET} PRIVATE
-            ${UMD_HOME}
-            ${CMAKE_SOURCE_DIR}
-            ${CMAKE_SOURCE_DIR}/tt_metal
-            ${CMAKE_SOURCE_DIR}/tt_metal/common
-            ${CMAKE_SOURCE_DIR}/tests
-            ${CMAKE_CURRENT_SOURCE_DIR}
-        )
-        set_target_properties(${TEST_TARGET} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/tt_eager/${TEST_DIR})
-        list(APPEND EAGER_TEST_TARGETS ${TEST_TARGET})
-    endforeach()
-    set(EAGER_TEST_TARGETS "${EAGER_TEST_TARGETS}" PARENT_SCOPE)
-endfunction()
-
-CREATE_EXEC("${TT_EAGER_TESTS_DTX}")
-CREATE_EXEC("${TT_EAGER_TESTS_OPS}")
-CREATE_EXEC("${TT_EAGER_TESTS_TENSORS}")
-CREATE_EXEC("${TT_EAGER_TESTS_INTEGRATION}")
+CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_DTX}")
+CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_OPS}")
+CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_TENSORS}")
+CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_INTEGRATION}")
 
 add_custom_target(eager_tests DEPENDS ${EAGER_TEST_TARGETS})

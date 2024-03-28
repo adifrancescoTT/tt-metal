@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
-project(tt-metal)
+cmake_policy(VERSION 3.16)
+project(tt-metal
+        VERSION 1.0
+        DESCRIPTION "Tenstorrent Metallium"
+        HOMEPAGE_URL "https://github.com/tenstorrent-metal/tt-metal"
+        LANGUAGES CXX
+)
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -DDEBUG=DEBUG")

@@ -43,7 +43,7 @@ set(LDFLAGS_ "${CONFIG_LDFLAGS} -L${CMAKE_BINARY_DIR}/lib -ldl -lz -lboost_threa
 set(SHARED_LIB_FLAGS_ "-shared -fPIC")
 set(STATIC_LIB_FLAGS_ "-fPIC")
 
-set (CMAKE_CXX_FLAGS_ "${CMAKE_CXX_FLAGS} --std=c++17 -fvisibility-inlines-hidden -Werror")
+set (CMAKE_CXX_FLAGS_ "${CMAKE_CXX_FLAGS_} --std=c++17 -fvisibility-inlines-hidden -Werror")
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     set(WARNINGS "${WARNINGS} -Wno-c++11-narrowing -Wno-c++2a-extensions")
