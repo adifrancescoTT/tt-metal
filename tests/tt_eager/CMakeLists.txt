@@ -48,7 +48,7 @@ set(TT_EAGER_TESTS_INTEGRATION
 )
 
 set(EAGER_TEST_TARGETS "")
-include(helper_functions.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/helper_functions.cmake)
 
 CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_DTX}")
 CREATE_EAGER_TEST_EXE("${TT_EAGER_TESTS_OPS}")

@@ -6,7 +6,10 @@ project(tt-metal
         HOMEPAGE_URL "https://github.com/tenstorrent-metal/tt-metal"
         LANGUAGES CXX
 )
-
+if(NOT CMAKE_BUILD_TYPE)
+    message(STATUS "Setting build type to 'RelWithDebInfo (assert)' as none was specified.")
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Assert build is the default" FORCE)
+endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -DDEBUG=DEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DDEBUG=DEBUG")
@@ -76,7 +79,7 @@ endif()
 # Build subdirectories
 ############################################
 # Build umd_device
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CMakeLists.txt)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/umd_device.cmake)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tt_metal/hw)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tt_metal)
