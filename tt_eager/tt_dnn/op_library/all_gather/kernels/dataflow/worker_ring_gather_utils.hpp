@@ -29,7 +29,7 @@ FORCE_INLINE void validate_sane_transaction_counters_rw() {
 // Only workers on local worker core, hence no uint64_t noc addresses
 template <ShardType SHARD_TYPE>
 struct FullWorkerGridShardAddrGen {
-
+    FullWorkerGridShardAddrGen()=default;
     FORCE_INLINE static void build_with_placement_new(FullWorkerGridShardAddrGen* placement_new_address, const uint32_t arg_index) {
         ccl::FullWorkerGridShardAddrGenArgs<false> input_args;
 
@@ -44,16 +44,22 @@ struct FullWorkerGridShardAddrGen {
         input_args.input_shard_num_tiles_y = get_arg_val<uint32_t>(curr_arg_index++);
         input_args.total_shards_x = get_arg_val<uint32_t>(curr_arg_index++);
         input_args.is_clockwise = get_arg_val<uint32_t>(curr_arg_index++) != 0;
+        input_args.curr_core_index = static_cast<uint16_t>(get_arg_val<uint32_t>(curr_arg_index++));
+        input_args.total_num_cores = static_cast<uint16_t>(get_arg_val<uint32_t>(curr_arg_index++));
+        input_args.dest_cores = reinterpret_cast<ccl::WorkerXY*>(get_arg_addr(curr_arg_index));
+        curr_arg_index += input_args.total_num_cores;
 
-        ASSERT(input_args.tile_size_in_bytes != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U32);
-        ASSERT(input_args.shards_start_address != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U32);
-        ASSERT(input_args.curr_shard_tile_x != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.curr_shard_tile_y != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.curr_tile_index != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.curr_shard != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.input_shard_num_tiles_x != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.input_shard_num_tiles_y != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.total_shards_x != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.tile_size_in_bytes != ccl::UNINITIALIZED_VALUE_U32);
+        ASSERT(input_args.shards_start_address != ccl::UNINITIALIZED_VALUE_U32);
+        ASSERT(input_args.curr_core_index != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.total_num_cores != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.curr_shard_tile_x != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.curr_shard_tile_y != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.curr_tile_index != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.curr_shard != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.input_shard_num_tiles_x != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.input_shard_num_tiles_y != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.total_shards_x != ccl::UNINITIALIZED_VALUE_U16);
 
         ASSERT(curr_arg_index - arg_index == input_args.get_expected_num_args());
 
@@ -63,8 +69,11 @@ struct FullWorkerGridShardAddrGen {
     FullWorkerGridShardAddrGen(
         uint8_t num_args_consumed,
         ccl::FullWorkerGridShardAddrGenArgs<false> const& input_args) :
+        dest_cores(input_args.dest_cores),
         tile_size_in_bytes(input_args.tile_size_in_bytes),
         shards_start_address(input_args.shards_start_address),
+        curr_core_index(input_args.curr_core_index),
+        total_num_cores(input_args.total_num_cores),
         curr_shard_tile_x(input_args.curr_shard_tile_x),
         curr_shard_tile_y(input_args.curr_shard_tile_y),
         curr_tile_index(input_args.curr_tile_index),
@@ -78,6 +87,8 @@ struct FullWorkerGridShardAddrGen {
         ASSERT(input_shard_num_tiles_x > 0);
         ASSERT(input_shard_num_tiles_y > 0);
         ASSERT(total_shards_x > 0);
+        ASSERT(total_num_cores > 0);
+        ASSERT(curr_core_index < total_num_cores);
         if constexpr (SHARD_TYPE == ccl::ShardType::Width) {
             ASSERT(curr_shard < total_shards_x);
             ASSERT(curr_tile_index = curr_shard_tile_x * input_shard_num_tiles_x + (curr_shard_tile_y * total_shards_x * input_shard_num_tiles_x));
@@ -87,63 +98,82 @@ struct FullWorkerGridShardAddrGen {
     }
 
 
-    uint32_t get_next_l1_addr() const {
-        return this->shards_start_address;
+    [[nodiscard]] FORCE_INLINE ccl::WorkerXY get_next_noc_xy_core() const {
+        ASSERT(this->curr_core_index < this->total_num_cores);
+        return this->dest_cores[this->curr_core_index];
     }
 
-    uint16_t get_tiles_left_in_row_in_shard() const {
+    [[nodiscard]] FORCE_INLINE uint64_t get_next_noc_addr() const {
+        ccl::WorkerXY dest_worker = this->get_next_noc_xy_core();
+        uint32_t curr_address = this->shards_start_address + this->curr_tile_index * this->tile_size_in_bytes;
+        ASSERT(curr_address + this->tile_size_in_bytes <= 1499136); // L1 wraparound - oops!
+        ASSERT(this->shards_start_address <= curr_address);
+        return get_noc_addr(dest_worker.x, dest_worker.y, curr_address);
+    }
+
+    FORCE_INLINE uint16_t get_tiles_left_in_row_in_shard() const {
         return this->input_shard_num_tiles_x - this->curr_shard_tile_x;
     }
 
-    uint16_t get_tile_size_in_bytes() const {
-        return this->tile_size_in_bytes;
-    }
-
-    void advance() {
-        ccl::all_gather::full_worker_grid_addr_gen_width_sharded_advance(
+    FORCE_INLINE void advance() {
+        ccl::all_gather::full_worker_grid_addr_gen_width_sharded_advance (
             this->curr_shard_tile_x,
             this->curr_shard_tile_y,
             this->curr_tile_index,
-            this->curr_shard,
+            this->curr_core_index, // add
+            this->total_num_cores, // add
             this->input_shard_num_tiles_x,
             this->input_shard_num_tiles_y,
             this->total_shards_x,
-            this->is_clockwise
-        );
-    }
-
-    void advance_to_next_tile_row() {
-        full_worker_grid_addr_gen_width_sharded_advance_full_tile_row(
-            this->curr_shard_tile_x,
-            this->curr_shard_tile_y,
-            this->curr_tile_index,
             this->curr_shard,
-            this->input_shard_num_tiles_x,
-            this->input_shard_num_tiles_y,
-            this->total_shards_x,
             this->is_clockwise);
     }
 
-    void advance_n_tiles(uint16_t n) {
+    FORCE_INLINE void advance_to_next_tile_row() {
+        ccl::all_gather::full_worker_grid_addr_gen_width_sharded_advance_full_tile_row(
+            this->curr_shard_tile_x,
+            this->curr_shard_tile_y,
+            this->curr_tile_index,
+            this->curr_core_index, // add
+            this->total_num_cores, // add
+            this->input_shard_num_tiles_x,
+            this->input_shard_num_tiles_y,
+            this->total_shards_x,
+            this->curr_shard,
+            this->is_clockwise);
+    }
+
+    FORCE_INLINE void advance_n_tiles(uint16_t n) {
         // TODO: optimize
         for (uint16_t i = 0; i < n; i++) {
             this->advance();
         }
     }
 
+    [[nodiscard]] FORCE_INLINE uint32_t get_tile_size_in_bytes() const {
+        return this->tile_size_in_bytes;
+    }
+
+    [[nodiscard]] FORCE_INLINE uint32_t get_shard_tile_row_size_in_bytes() const {
+        return this->input_shard_num_tiles_x * this->tile_size_in_bytes;
+    }
+
     [[nodiscard]] FORCE_INLINE uint32_t get_num_args_consumed() const { return this->num_args_consumed; }
 
+    ccl::WorkerXY* dest_cores;
     uint32_t tile_size_in_bytes;
     uint32_t shards_start_address;
+    uint16_t curr_core_index;
+    uint16_t total_num_cores;
     uint16_t curr_shard_tile_x;
     uint16_t curr_shard_tile_y;
     uint16_t curr_tile_index;
     uint16_t curr_shard;
-    uint16_t const input_shard_num_tiles_x;
-    uint16_t const input_shard_num_tiles_y;
-    uint16_t const total_shards_x;
+    uint16_t input_shard_num_tiles_x;
+    uint16_t input_shard_num_tiles_y;
+    uint16_t total_shards_x;
     uint8_t num_args_consumed;
-    bool const is_clockwise;
+    bool is_clockwise;
 };
 
 
@@ -171,12 +201,12 @@ struct ShardAddrGen final {
         input_args.dest_cores = reinterpret_cast<ccl::WorkerXY*>(get_arg_addr(curr_arg_index));
         curr_arg_index += input_args.num_dest_cores;
 
-        ASSERT(input_args.shard_size_in_bytes != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U32);
-        ASSERT(input_args.total_chunks_per_core != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.shards_start_address != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U32);
-        ASSERT(input_args.starting_core_index != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.starting_chunk_into_shard != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
-        ASSERT(input_args.num_dest_cores != ccl::ShardAddrGenArgs<false>::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.shard_size_in_bytes != ccl::UNINITIALIZED_VALUE_U32);
+        ASSERT(input_args.total_chunks_per_core != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.shards_start_address != ccl::UNINITIALIZED_VALUE_U32);
+        ASSERT(input_args.starting_core_index != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.starting_chunk_into_shard != ccl::UNINITIALIZED_VALUE_U16);
+        ASSERT(input_args.num_dest_cores != ccl::UNINITIALIZED_VALUE_U16);
 
         ASSERT(curr_arg_index - arg_index == input_args.get_expected_num_args());
 

@@ -437,7 +437,7 @@ def test_all_gather_on_t3000_nightly(
 
 # @pytest.mark.skip("Not ready for prime time")
 @skip_for_grayskull("Requires eth connected devices to run")
-@pytest.mark.parametrize("num_devices", [8])
+@pytest.mark.parametrize("num_devices", [4, 8])
 @pytest.mark.parametrize("dim", [3])
 @pytest.mark.parametrize("tensor_layout", [ttl.tensor.Layout.TILE])
 # @pytest.mark.parametrize("num_cores", [1])
@@ -478,36 +478,26 @@ def test_all_gather_on_t3000_nightly(
             (32, 128),
             ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(0, 0))}),
         ),
-        # ( # Only works with single worker until we have better iterator
-        #     (1, 1, 32, 64),
-        #     (32, 32),
-        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(1, 0))}),
-        # ),
-        # (
-        #     (1, 1, 32, 128),
-        #     (32, 64),
-        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(1, 0))}),
-        # ),
-        # (
-        #     (1, 1, 32, 256),
-        #     (32, 32),
-        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        # ),
-        # (
-        #     (1, 1, 32, 512),
-        #     (32, 64),
-        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        # ),
-        # (
-        #     # 2048 wide works
-        #     # 3072 wide hangs -> maybe I'm exceeding some size limit... (add asserts on buffer sizes:
-        #     #  - eth buffer size
-        #     #  - shard buffer size
-        #     # )
-        #     (1, 1, 32, 3072),
-        #     (32, 128),
-        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 2))}),
-        # ),
+        (  # Only works with single worker until we have better iterator
+            (1, 1, 32, 64),
+            (32, 32),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(1, 0))}),
+        ),
+        (
+            (1, 1, 32, 128),
+            (32, 64),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(1, 0))}),
+        ),
+        (
+            (1, 1, 32, 256),
+            (32, 32),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
+        (
+            (1, 1, 32, 512),
+            (32, 64),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
         # LLama
         (
             (1, 1, 32, 1024),
@@ -534,6 +524,31 @@ def test_all_gather_on_t3000_nightly(
             (32, 32),
             ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 6))}),
         ),
+        (
+            (1, 1, 64, 256),
+            (64, 32),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
+        (
+            (1, 1, 64, 512),
+            (64, 64),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
+        (
+            (1, 1, 96, 512),
+            (96, 32),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
+        (
+            (1, 1, 96, 1024),
+            (96, 64),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
+        (
+            (1, 1, 96, 1024),
+            (96, 32),
+            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        ),
     ),
 )
 def test_all_gather_post_commit_sharded(
@@ -557,6 +572,15 @@ def test_all_gather_post_commit_sharded(
 
     if input_dtype == ttl.tensor.DataType.BFLOAT8_B:
         pytest.skip("Only BFLOAT8_B not supported yet")
+
+    if input_shard_shape[0] > 32 and num_devices == 8:
+        pytest.skip("Don't want to exercise yet")
+
+    if input_shard_shape[0] > 32 and num_devices == 8:
+        pytest.skip("Don't want to exercise yet")
+
+    if input_shard_shape[0] == 32 and num_devices == 4:
+        pytest.skip("Don't want to exercise yet")
 
     numel = input_shape[0] * input_shape[1] * input_shape[2] * input_shape[3] * num_devices
     unchunked_input_shape = list(input_shape)

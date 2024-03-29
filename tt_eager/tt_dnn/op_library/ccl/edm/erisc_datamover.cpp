@@ -104,6 +104,7 @@ struct sender_receiver_index_t {
 };
 
 void kernel_main() {
+    DPRINT << "EDM START\n";
     // COMPILE TIME ARGS
     // If true, will enable this erisc's sender functionality
     constexpr bool enable_sender_side = get_compile_time_arg_val(0) != 0;
@@ -113,8 +114,9 @@ void kernel_main() {
 
     constexpr uint32_t num_senders = get_compile_time_arg_val(2);
     constexpr uint32_t num_receivers = get_compile_time_arg_val(3);
+    constexpr ccl::EriscDataMoverBufferSharingMode edm_buffer_sharing_mode = static_cast<ccl::EriscDataMoverBufferSharingMode>(get_compile_time_arg_val(4));
 
-    std::array<erisc::datamover::ChannelBuffer, eth_l1_mem::address_map::MAX_NUM_CONCURRENT_TRANSACTIONS> buffer_channels;
+    std::array<erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>, eth_l1_mem::address_map::MAX_NUM_CONCURRENT_TRANSACTIONS> buffer_channels;
 
     //
     std::array<uint32_t, eth_l1_mem::address_map::MAX_NUM_CONCURRENT_TRANSACTIONS> printed_receiver_done;
@@ -139,7 +141,7 @@ void kernel_main() {
         const uint32_t sender_num_workers = get_arg_val<uint32_t>(args_offset++);
         const uint32_t workers_xy_list_addr = get_arg_addr(args_offset);
         args_offset += sender_num_workers;
-        new (&buffer_channels[sender_channels_start + channel]) erisc::datamover::ChannelBuffer(
+        new (&buffer_channels[sender_channels_start + channel]) erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>(
             sender_channels_start + channel,
             sender_buffer_address,
             sender_channel_size,
@@ -169,7 +171,7 @@ void kernel_main() {
         uint32_t const receiver_num_workers = get_arg_val<uint32_t>(args_offset++);
         const uint32_t workers_xy_list_addr = get_arg_addr(args_offset);
         args_offset += receiver_num_workers;
-        new (&buffer_channels[receiver_channels_start + channel]) erisc::datamover::ChannelBuffer(
+        new (&buffer_channels[receiver_channels_start + channel]) erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>(
             receiver_channels_start + channel,
             receiver_buffers_base_address,
             receiver_channel_size,
@@ -211,28 +213,28 @@ void kernel_main() {
         //////////////////////////////////////
         // SENDER
         if constexpr (enable_sender_side) {
-            erisc::datamover::ChannelBuffer &current_sender = buffer_channels[send_recv_index.real_index.sender];
+            erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode> &current_sender = buffer_channels[send_recv_index.real_index.sender];
             switch (current_sender.get_state()) {
-                case erisc::datamover::ChannelBuffer::STATE::WAITING_FOR_WORKER:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::WAITING_FOR_WORKER:
                 did_something_sender =
                     erisc::datamover::sender_noc_receive_payload_ack_check_sequence(current_sender);
                 break;
 
-                case erisc::datamover::ChannelBuffer::STATE::READY_FOR_ETH_TRANSFER:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::READY_FOR_ETH_TRANSFER:
                 did_something_sender = erisc::datamover::sender_eth_send_data_sequence(current_sender);
                     break;
 
-                case erisc::datamover::ChannelBuffer::STATE::SIGNALING_WORKER:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::SIGNALING_WORKER:
                 did_something_sender = erisc::datamover::sender_notify_workers_if_buffer_available_sequence(
                                     current_sender, num_senders_complete);
                 senders_in_progress = senders_in_progress && num_senders_complete != sender_num_channels;
                 break;
 
-                case erisc::datamover::ChannelBuffer::STATE::WAITING_FOR_ETH:
-
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::WAITING_FOR_ETH:
                 did_something_sender =
                     erisc::datamover::sender_eth_check_receiver_ack_sequence(current_sender, num_senders_complete);
                 senders_in_progress = senders_in_progress && num_senders_complete != sender_num_channels;
+                break;
 
                 default:
                 break;
@@ -242,19 +244,19 @@ void kernel_main() {
         //////////////////////////////////////
         // RECEIVER
         if constexpr (enable_receiver_side) {
-            erisc::datamover::ChannelBuffer &current_receiver = buffer_channels[send_recv_index.real_index.receiver];
+            erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode> &current_receiver = buffer_channels[send_recv_index.real_index.receiver];
 
             switch (current_receiver.get_state()) {
-                case erisc::datamover::ChannelBuffer::STATE::WAITING_FOR_ETH:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::WAITING_FOR_ETH:
                 did_something_receiver = erisc::datamover::receiver_eth_accept_payload_sequence(current_receiver);
                 break;
 
-                case erisc::datamover::ChannelBuffer::STATE::SIGNALING_WORKER:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::SIGNALING_WORKER:
                 did_something_receiver =
                     erisc::datamover::receiver_eth_notify_workers_payload_available_sequence(current_receiver);
                 break;
 
-                case erisc::datamover::ChannelBuffer::STATE::WAITING_FOR_WORKER:
+                case erisc::datamover::ChannelBuffer<edm_buffer_sharing_mode>::STATE::WAITING_FOR_WORKER:
                 did_something_receiver = erisc::datamover::receiver_noc_read_worker_completion_check_sequence(
                                     current_receiver, num_receivers_complete);
                 receivers_in_progress = receivers_in_progress && num_receivers_complete != receiver_num_channels;
@@ -280,4 +282,5 @@ void kernel_main() {
     }
 
 
+    DPRINT << "EDM END\n";
 }
