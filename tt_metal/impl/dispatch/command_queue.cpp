@@ -337,9 +337,9 @@ EnqueueProgramCommand::EnqueueProgramCommand(
             for (int i = 0; i < num_packed_cmds; i++) {
                 flush.relay_inline.stride += transfer_info[i].data.size() * sizeof(uint32_t);
                 std::cout << " flush stride " << std::dec << flush.relay_inline.stride << std::endl;
-                flush.relay_inline.stride = align(flush.relay_inline.stride, HUGEPAGE_ALIGNMENT);
-                std::cout << " flush stride " << std::dec << flush.relay_inline.stride << std::endl;
+                flush.relay_inline.stride = align(flush.relay_inline.stride, L1_ALIGNMENT);
             }
+            flush.relay_inline.stride = align(flush.relay_inline.stride, HUGEPAGE_ALIGNMENT);
             flush.relay_inline.length = flush.relay_inline.stride - sizeof(CQPrefetchCmd);
             std::cout << " flush stride " << std::dec << flush.relay_inline.stride << std::endl;
 
@@ -366,8 +366,8 @@ EnqueueProgramCommand::EnqueueProgramCommand(
             // TODO : should the alignment here be L1 or HUGEPAGE or cmd size
             if ((padding = (sizeof(CQPrefetchCmd) + sizeof(CQDispatchCmd) +
                             num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd)) %
-                           sizeof(CQDispatchCmd)) != 0) {
-                for (int j = 0; j < (sizeof(CQDispatchCmd) - padding) / sizeof(uint32_t); j++) {
+                           L1_ALIGNMENT) != 0) {
+                for (int j = 0; j < (L1_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
                     this->commands.push_back(0);
                 }
             }
@@ -377,10 +377,15 @@ EnqueueProgramCommand::EnqueueProgramCommand(
                 for (int j = 0; j < data_len; j++) {
                     this->commands.push_back(214 + j);
                 }
-                if ((padding = (commands.size() * sizeof(uint32_t)) % HUGEPAGE_ALIGNMENT) != 0) {
-                    for (int j = 0; j < (HUGEPAGE_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
+                if ((padding = (commands.size() * sizeof(uint32_t)) % L1_ALIGNMENT) != 0) {
+                    for (int j = 0; j < (L1_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
                         this->commands.push_back(0);
                     }
+                }
+            }
+            if ((padding = (commands.size() * sizeof(uint32_t)) % HUGEPAGE_ALIGNMENT) != 0) {
+                for (int j = 0; j < (HUGEPAGE_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
+                    this->commands.push_back(0);
                 }
             }
         }
@@ -389,12 +394,13 @@ EnqueueProgramCommand::EnqueueProgramCommand(
             std::uint32_t num_packed_cmds = transfer_info.size();
             flush.relay_inline.stride =
                 sizeof(CQPrefetchCmd) + sizeof(CQDispatchCmd) +
-                align(num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd), sizeof(CQDispatchCmd));
+                align(num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd), L1_ALIGNMENT);
             for (int i = 0; i < num_packed_cmds; i++) {
                 // TODO: is this right??
                 flush.relay_inline.stride += transfer_info[i].data.size() * sizeof(uint32_t);
-                flush.relay_inline.stride = align(flush.relay_inline.stride, HUGEPAGE_ALIGNMENT);
+                flush.relay_inline.stride = align(flush.relay_inline.stride, L1_ALIGNMENT);
             }
+            flush.relay_inline.stride = align(flush.relay_inline.stride, HUGEPAGE_ALIGNMENT);
             flush.relay_inline.length = flush.relay_inline.stride - sizeof(CQPrefetchCmd);
             std::cout << " flush stride " << std::dec << flush.relay_inline.stride << std::endl;
 
@@ -419,7 +425,7 @@ EnqueueProgramCommand::EnqueueProgramCommand(
             // TODO : should the alignment here be L1 or HUGEPAGE or cmd size
             if ((padding = (sizeof(CQPrefetchCmd) + sizeof(CQDispatchCmd) +
                             num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd)) %
-                           sizeof(CQDispatchCmd)) != 0) {
+                           L1_ALIGNMENT) != 0) {
                 for (int j = 0; j < (sizeof(CQDispatchCmd) - padding) / sizeof(uint32_t); j++) {
                     this->commands.push_back(0);
                 }
@@ -430,10 +436,15 @@ EnqueueProgramCommand::EnqueueProgramCommand(
                 for (int j = 0; j < data_len; j++) {
                     this->commands.push_back(300 + j);
                 }
-                if ((padding = (commands.size() * sizeof(uint32_t)) % HUGEPAGE_ALIGNMENT) != 0) {
-                    for (int j = 0; j < (HUGEPAGE_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
+                if ((padding = (commands.size() * sizeof(uint32_t)) % L1_ALIGNMENT) != 0) {
+                    for (int j = 0; j < (L1_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
                         this->commands.push_back(0);
                     }
+                }
+            }
+            if ((padding = (commands.size() * sizeof(uint32_t)) % HUGEPAGE_ALIGNMENT) != 0) {
+                for (int j = 0; j < (HUGEPAGE_ALIGNMENT - padding) / sizeof(uint32_t); j++) {
+                    this->commands.push_back(0);
                 }
             }
         }
@@ -644,7 +655,7 @@ const void EnqueueProgramCommand::assemble_device_commands(uint32_t host_data_sr
         std::uint32_t packed_data_idx = cmd_idx + align(
                                                       sizeof(CQPrefetchCmd) + sizeof(CQDispatchCmd) +
                                                           num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd),
-                                                      sizeof(CQDispatchCmd)) /
+                                                      L1_ALIGNMENT) /
                                                       sizeof(uint32_t);
         std::cout << " packed data idx " << packed_data_idx << std::endl;
         for (int i = 0; i < num_packed_cmds; i++) {
@@ -654,7 +665,7 @@ const void EnqueueProgramCommand::assemble_device_commands(uint32_t host_data_sr
                 runtime_args_data[j] = transfer_info[i].data[j];
             }
             packed_data_idx += transfer_info[i].data.size();
-            packed_data_idx = align(packed_data_idx * sizeof(uint32_t), HUGEPAGE_ALIGNMENT) / sizeof(uint32_t);
+            packed_data_idx = align(packed_data_idx * sizeof(uint32_t), L1_ALIGNMENT) / sizeof(uint32_t);
         }
         std::cout << "packed data idx " << packed_data_idx << std::endl;
         cmd_idx = align(packed_data_idx * sizeof(uint32_t), HUGEPAGE_ALIGNMENT) / sizeof(uint32_t);
@@ -685,7 +696,7 @@ const void EnqueueProgramCommand::assemble_device_commands(uint32_t host_data_sr
         std::uint32_t packed_data_idx = cmd_idx + align(
                                                       sizeof(CQPrefetchCmd) + sizeof(CQDispatchCmd) +
                                                           num_packed_cmds * sizeof(CQDispatchWritePackedUnicastSubCmd),
-                                                      sizeof(CQDispatchCmd)) /
+                                                      L1_ALIGNMENT) /
                                                       sizeof(uint32_t);
         for (int i = 0; i < num_packed_cmds; i++) {
             uint32_t* semaphores_data = (uint32_t*)(this->commands.data() + packed_data_idx);
@@ -693,7 +704,7 @@ const void EnqueueProgramCommand::assemble_device_commands(uint32_t host_data_sr
                 semaphores_data[j] = transfer_info[i].data[j];
             }
             packed_data_idx += transfer_info[i].data.size();
-            packed_data_idx = align(packed_data_idx * sizeof(uint32_t), HUGEPAGE_ALIGNMENT) / sizeof(uint32_t);
+            packed_data_idx = align(packed_data_idx * sizeof(uint32_t), L1_ALIGNMENT) / sizeof(uint32_t);
         }
         cmd_idx = align(packed_data_idx * sizeof(uint32_t), HUGEPAGE_ALIGNMENT) / sizeof(uint32_t);
     }
