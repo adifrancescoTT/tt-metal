@@ -25,7 +25,6 @@ from models.experimental.falcon40b.tt.model_config import (
 from models.utility_functions import (
     torch2tt_tensor,
     tt2torch_tensor,
-    # profiler,
     enable_persistent_kernel_cache,
     disable_persistent_kernel_cache,
     disable_compilation_reports,
@@ -54,9 +53,6 @@ def run_test_FalconCausalLM_end_to_end(
     expected_inference_time,
     inference_iterations,
 ):
-    # Clear global profiler state before starting measurements
-    # profiler.clear()
-
     model_name = model_location_generator(model_version, model_subdir="Falcon")
 
     # profiler.start("hugging_face_model_setup")
@@ -277,70 +273,27 @@ def run_test_FalconCausalLM_end_to_end(
     del tt_embeddings
     del tt_attention_mask
 
-    # Second run for perf ----------------------------------------------------------------
-    logger.info(f"Enable profiler and enable binary and compile cache")
-    # profiler.enable()
-    enable_persistent_kernel_cache()
-
-    def run_inference():
-        if llm_mode == "prefill":
-            model_inputs = torch.split(model_input, 1)
-            tt_embeddings, tt_attention_mask = zip(
-                *[
-                    tt_FalconCausalLM.model_preprocessing(llm_mode, m_i, kv_cache_len, num_input_tokens=seq_len)
-                    for m_i in model_inputs
-                ]
-            )
-        elif llm_mode == "decode":
-            tt_embeddings = [
-                tt_embeddings_host[i].to(devices[i], model_config["WORD_EMBEDDING_OUTPUT_MEMCFG"])
-                for i in range(len(devices))
+    # Prepare inputs
+    if llm_mode == "prefill":
+        model_inputs = torch.split(model_input, 1)
+        tt_embeddings, tt_attention_mask = zip(
+            *[
+                tt_FalconCausalLM.model_preprocessing(llm_mode, m_i, kv_cache_len, num_input_tokens=seq_len)
+                for m_i in model_inputs
             ]
-            tt_attention_mask = [
-                tt_attention_mask_host[i].to(devices[i], attention_mask_memconfig) for i in range(len(devices))
-            ]
-        for _ in range(inference_iterations - 1):
-            if llm_mode == "prefill":
-                tt_outs = []
-                for user_id in range(batch):
-                    tt_out, tt_layer_present = tt_FalconCausalLM(
-                        input_embeddings=tt_embeddings[user_id],
-                        llm_mode=llm_mode,
-                        attention_mask=tt_attention_mask[user_id],
-                        user_id=user_id,
-                        layer_past=tt_layer_past,
-                        layer_past_len=kv_cache_len,
-                        use_cache=use_cache,
-                    )
-                    tt_outs.append(tt_out)
-                model_inputs = torch.split(model_input, 1)
-                tt_embeddings, tt_attention_mask = zip(
-                    *[
-                        tt_FalconCausalLM.model_preprocessing(llm_mode, m_i, kv_cache_len, num_input_tokens=seq_len)
-                        for m_i in model_inputs
-                    ]
-                )
-                tt_outs = [[tt_o.cpu() for tt_o in tt_out] for tt_out in tt_outs]
+        )
+    elif llm_mode == "decode":
+        tt_embeddings = [
+            tt_embeddings_host[i].to(devices[i], model_config["WORD_EMBEDDING_OUTPUT_MEMCFG"])
+            for i in range(len(devices))
+        ]
+        tt_attention_mask = [
+            tt_attention_mask_host[i].to(devices[i], attention_mask_memconfig) for i in range(len(devices))
+        ]
 
-            elif llm_mode == "decode":
-                tt_out, tt_layer_present = tt_FalconCausalLM(
-                    input_embeddings=tt_embeddings,
-                    llm_mode=llm_mode,
-                    attention_mask=tt_attention_mask,
-                    layer_past=tt_layer_past,
-                    layer_past_len=kv_cache_len,
-                    use_cache=use_cache,
-                )
-                tt_embeddings = [
-                    tt_embeddings_host[i].to(devices[i], model_config["WORD_EMBEDDING_OUTPUT_MEMCFG"])
-                    for i in range(len(devices))
-                ]
-                tt_attention_mask = [
-                    tt_attention_mask_host[i].to(devices[i], attention_mask_memconfig) for i in range(len(devices))
-                ]
-                tt_out = [tt_o.cpu() for tt_o in tt_out]
-
-        start_time = time.time()
+    # Run warmup interations - profiler still disabled
+    # profiler.start(f"model_warmup_run_for_inference")
+    for _ in range(inference_iterations - 1):
         if llm_mode == "prefill":
             tt_outs = []
             for user_id in range(batch):
@@ -354,6 +307,13 @@ def run_test_FalconCausalLM_end_to_end(
                     use_cache=use_cache,
                 )
                 tt_outs.append(tt_out)
+            model_inputs = torch.split(model_input, 1)
+            tt_embeddings, tt_attention_mask = zip(
+                *[
+                    tt_FalconCausalLM.model_preprocessing(llm_mode, m_i, kv_cache_len, num_input_tokens=seq_len)
+                    for m_i in model_inputs
+                ]
+            )
             tt_outs = [[tt_o.cpu() for tt_o in tt_out] for tt_out in tt_outs]
 
         elif llm_mode == "decode":
@@ -365,17 +325,51 @@ def run_test_FalconCausalLM_end_to_end(
                 layer_past_len=kv_cache_len,
                 use_cache=use_cache,
             )
+            tt_embeddings = [
+                tt_embeddings_host[i].to(devices[i], model_config["WORD_EMBEDDING_OUTPUT_MEMCFG"])
+                for i in range(len(devices))
+            ]
+            tt_attention_mask = [
+                tt_attention_mask_host[i].to(devices[i], attention_mask_memconfig) for i in range(len(devices))
+            ]
             tt_out = [tt_o.cpu() for tt_o in tt_out]
-        duration = time.time() - start_time
-        return duration
+    # profiler.end(f"model_warmup_run_for_inference")
+    for device in devices:
+        tt_lib.device.Synchronize(device)
 
-    # compile_time = run_inference()
-    # # for device in devices:
-    # #     tt_lib.device.Synchronize(device)
+    logger.info(f"Enable binary and compile cache, and start timing.")
+    enable_persistent_kernel_cache()
+    start_time = time.time()
 
-    inference_duration = run_inference()
-    # for device in devices:
-    #     tt_lib.device.Synchronize(device)
+    if llm_mode == "prefill":
+        tt_outs = []
+        for user_id in range(batch):
+            tt_out, tt_layer_present = tt_FalconCausalLM(
+                input_embeddings=tt_embeddings[user_id],
+                llm_mode=llm_mode,
+                attention_mask=tt_attention_mask[user_id],
+                user_id=user_id,
+                layer_past=tt_layer_past,
+                layer_past_len=kv_cache_len,
+                use_cache=use_cache,
+            )
+            tt_outs.append(tt_out)
+        tt_outs = [[tt_o.cpu() for tt_o in tt_out] for tt_out in tt_outs]
+
+    elif llm_mode == "decode":
+        tt_out, tt_layer_present = tt_FalconCausalLM(
+            input_embeddings=tt_embeddings,
+            llm_mode=llm_mode,
+            attention_mask=tt_attention_mask,
+            layer_past=tt_layer_past,
+            layer_past_len=kv_cache_len,
+            use_cache=use_cache,
+        )
+        tt_out = [tt_o.cpu() for tt_o in tt_out]
+    inference_duration = time.time() - start_time
+
+    for device in devices:
+        tt_lib.device.Synchronize(device)
 
     logger.info(f"falcon 40b compile time: {compile_duration}")
     logger.info(f"falcon 40b inference time: {inference_duration}")
@@ -464,8 +458,6 @@ def test_perf_bare_metal(
 
     disable_persistent_kernel_cache()
     disable_compilation_reports()
-
-    # tt_lib.profiler.set_profiler_location(f"falcon-40b_{request.node.callspec.id}")
 
     run_test_FalconCausalLM_end_to_end(
         devices,
