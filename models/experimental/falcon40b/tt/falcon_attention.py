@@ -362,6 +362,49 @@ class TtFalconAttention:
         Prefill input shape: [batch, 1, seq_len, hidden_size]
         Decode input shape: [seq_len, 1, batch, hidden_size]
         """
+        if llm_mode == "prefill":
+            return self.fwd_prefill(
+                hidden_states=hidden_states,
+                alibi=alibi,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        elif llm_mode == "decode":
+            return self.fwd_decode(
+                hidden_states=hidden_states,
+                alibi=alibi,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        else:
+            assert False
+
+    def fwd_prefill(
+        self,
+        hidden_states: tt_lib.tensor.Tensor,
+        alibi: torch.Tensor,
+        attention_mask: tt_lib.tensor.Tensor,
+        llm_mode: str,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[tt_lib.tensor.Tensor]] = None,
+        layer_past_len: int = 0,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+    ) -> Tuple[tt_lib.tensor.Tensor, Optional[Tuple[tt_lib.tensor.Tensor]]]:
+        """
+        Prefill input shape: [batch, 1, seq_len, hidden_size]
+        Decode input shape: [seq_len, 1, batch, hidden_size]
+        """
 
         assert not output_attentions
 
@@ -685,6 +728,360 @@ class TtFalconAttention:
                 self.model_config["COMPUTE_KERNEL_CONFIG"],
                 output_mem_config=self.model_config["SELFOUT_MM_OUTPUT_MEMCFG"],
                 output_dtype=self.model_config["SELFOUT_MM_OUTPUT_DTYPE"],
+            )
+
+        return attn_output, layer_present
+
+    def fwd_decode(
+        self,
+        hidden_states: tt_lib.tensor.Tensor,
+        alibi: torch.Tensor,
+        attention_mask: torch.Tensor,
+        llm_mode: str,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[tt_lib.tensor.Tensor]] = None,
+        layer_past_len: int = 0,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+    ) -> Tuple[tt_lib.tensor.Tensor, Optional[Tuple[tt_lib.tensor.Tensor]]]:
+        """
+        Prefill input shape: [batch, 1, seq_len, hidden_size]
+        Decode input shape: [seq_len, 1, batch, hidden_size]
+        """
+
+        assert not output_attentions
+
+        if llm_mode == "prefill":
+            batch = hidden_states[0].get_legacy_shape()[0]
+            q_len = hidden_states[0].get_legacy_shape()[2]
+            assert layer_past is not None
+        elif llm_mode == "decode":
+            batch = hidden_states[0].get_legacy_shape()[2]
+            q_len = hidden_states[0].get_legacy_shape()[0]
+            padded_layer_past_len = nearest_32(layer_past_len + 1)
+            # We always store max_position_embeddings for kv_cache,
+            # so we need separate variable to store the actual len of the kv_cache
+            assert layer_past is not None
+            assert layer_past_len > 0 and layer_past_len <= self.max_position_embeddings
+        else:
+            raise NotImplementedError(f"Llm mode {llm_mode} is not supported! Must be one of prefill or decode.")
+
+        # Reshard
+        if self.model_config["LN_ATTN_OUTPUT_MEMCFG"] != self.model_config["FUSED_QKV_MM_INPUT_MEMCFG"]:
+            for i in range(len(hidden_states)):
+                hidden_states[i] = tt_lib.tensor.sharded_to_interleaved(
+                    hidden_states[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                )
+            for i in range(len(hidden_states)):
+                hidden_states[i] = tt_lib.tensor.interleaved_to_sharded(
+                    hidden_states[i], sharded_mem_config=self.model_config["FUSED_QKV_MM_INPUT_MEMCFG"]
+                )
+
+        #################
+        ### FUSED QKV ###
+        #################
+        fused_query_key_value = []
+        for i in range(len(hidden_states)):
+            fused_query_key_value.append(
+                tt_lib.operations.primary.matmul_1d(
+                    hidden_states[i],
+                    self.query_key_value_weights[i],
+                    program_config=self.model_config["QKV_MM_PROGCFG"],
+                    output_mem_config=self.model_config["FUSED_QKV_MM_OUTPUT_MEMCFG"],
+                    output_dtype=self.model_config["FUSED_QKV_MM_OUTPUT_DTYPE"],
+                    compute_kernel_config=self.model_config["COMPUTE_KERNEL_CONFIG"],
+                )
+            )
+
+        ###########
+        ### TMs ###
+        ###########
+        # TODO: Need to uplift nlp_create_qkv_heads to support HEIGHT > 32 for sharded; otherwise, need to spill to interleaved for prefill
+        if llm_mode == "prefill":
+            if self.model_config["FUSED_QKV_MM_OUTPUT_MEMCFG"] != self.model_config["CREATE_QKV_HEADS_INPUT_MEMCFG"]:
+                for i in range(len(fused_query_key_value)):
+                    fused_query_key_value[i] = tt_lib.tensor.sharded_to_interleaved(
+                        fused_query_key_value[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                    )
+                for i in range(len(fused_query_key_value)):
+                    fused_query_key_value[i] = tt_lib.tensor.interleaved_to_sharded(
+                        fused_query_key_value[i], sharded_mem_config=self.model_config["CREATE_QKV_HEADS_INPUT_MEMCFG"]
+                    )
+
+        elif llm_mode == "decode":
+            if self.model_config["FUSED_QKV_MM_OUTPUT_MEMCFG"] != self.model_config["CREATE_QKV_HEADS_INPUT_MEMCFG"]:
+                for i in range(len(fused_query_key_value)):
+                    fused_query_key_value[i] = tt_lib.tensor.sharded_to_interleaved(
+                        fused_query_key_value[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                    )
+                for i in range(len(fused_query_key_value)):
+                    fused_query_key_value[i] = tt_lib.tensor.interleaved_to_sharded(
+                        fused_query_key_value[i], sharded_mem_config=self.model_config["CREATE_QKV_HEADS_INPUT_MEMCFG"]
+                    )
+
+        query_layer = []
+        key_layer = []
+        value_layer = []
+        if llm_mode == "prefill":
+            for i in range(len(fused_query_key_value)):
+                q_layer, k_layer, v_layer = tt_lib.tensor.nlp_create_qkv_heads(
+                    fused_query_key_value[i],
+                    num_heads=self.num_heads // len(self.devices),
+                    num_kv_heads=self.num_kv_heads // len(self.devices),
+                    transpose_k_heads=False,
+                    output_mem_config=self.model_config["CREATE_QKV_HEADS_OUTPUT_MEMCFG"],
+                )
+                fused_query_key_value[i].deallocate(True)
+                query_layer.append(q_layer)
+                key_layer.append(k_layer)
+                value_layer.append(v_layer)
+
+            # TODO: Remove this; only need this if we spill to interleaved for nlp_create_qkv_heads
+            # for i in range(len(query_layer)):
+            #     query_layer[i] = tt_lib.tensor.interleaved_to_sharded(
+            #         query_layer[i], sharded_mem_config=self.model_config["CREATE_Q_HEADS_OUTPUT_MEMCFG"]
+            #     )
+            #     key_layer[i] = tt_lib.tensor.interleaved_to_sharded(
+            #         key_layer[i], sharded_mem_config=self.model_config["CREATE_KV_HEADS_OUTPUT_MEMCFG"]
+            #     )
+            #     value_layer[i] = tt_lib.tensor.interleaved_to_sharded(
+            #         value_layer[i], sharded_mem_config=self.model_config["CREATE_KV_HEADS_OUTPUT_MEMCFG"]
+            #     )
+        elif llm_mode == "decode":
+            for i in range(len(fused_query_key_value)):
+                q_layer, k_layer, v_layer = tt_lib.tensor.nlp_create_qkv_heads(
+                    fused_query_key_value[i],
+                    num_heads=self.num_heads // len(self.devices),
+                    num_kv_heads=self.num_kv_heads // len(self.devices),
+                    transpose_k_heads=False,
+                    output_mem_config=self.model_config["CREATE_QKV_HEADS_OUTPUT_MEMCFG"],
+                )
+                fused_query_key_value[i].deallocate(True)
+                query_layer.append(q_layer)
+                key_layer.append(k_layer)
+                value_layer.append(v_layer)
+
+        #########################
+        ### ROTARY EMBEDDINGS ###
+        #########################
+        if llm_mode == "prefill":
+            query_layer = self.rotary_embedding(query_layer)
+            key_layer = self.rotary_embedding(key_layer)
+        elif llm_mode == "decode":
+            query_layer = self.rotary_embedding(query_layer, layer_past_len)
+            key_layer = self.rotary_embedding(key_layer, layer_past_len)
+
+        ######################
+        ### K CACHE UPDATE ###
+        ######################
+        if llm_mode == "prefill":
+            for i in range(len(layer_past[0])):
+                tt_lib.tensor.fill_cache(layer_past[0][i], key_layer[i], user_id)
+        elif llm_mode == "decode":
+            kv_cache_memcfg = self.model_config["KV_CACHE_SLICE_OUTPUT_MEMCFG"]
+            if kv_cache_memcfg.is_sharded():
+                kv_cache_shard_shape = kv_cache_memcfg.shard_spec.shape
+                kv_cache_shard_shape[0] = layer_past[0][0].get_legacy_shape()[1] * padded_layer_past_len
+                kv_cache_memcfg.shard_spec.shape = kv_cache_shard_shape
+            # Update kv_cache in place
+            for i in range(len(key_layer)):
+                tt_lib.tensor.update_cache(layer_past[0][i], key_layer[i], layer_past_len)
+                key_layer[i].deallocate(True)
+            # key and value layers will have kv_seq_len padded to nearest 32
+            for i in range(len(layer_past[0])):
+                key_layer[i] = tt_lib.tensor.unpad(
+                    layer_past[0][i],
+                    [0, 0, 0, 0],
+                    [
+                        batch - 1,
+                        self.num_kv_heads // len(self.devices) - 1,
+                        padded_layer_past_len - 1,
+                        self.head_dim - 1,
+                    ],
+                    output_mem_config=self.model_config["DEFAULT_MEMCFG"],
+                )
+            for i in range(len(key_layer)):
+                key_layer[i] = tt_lib.tensor.interleaved_to_sharded(key_layer[i], sharded_mem_config=kv_cache_memcfg)
+
+        ######################
+        ### PRE-SOFTMAX MM ###
+        ######################
+        # TODO: Sharded transpose could be in place???
+        key_layer_transposed = []
+        for i in range(len(key_layer)):
+            key_layer_transposed.append(
+                tt_lib.tensor.transpose(
+                    key_layer[i],
+                    -2,
+                    -1,
+                    output_mem_config=self.model_config["K_TRANSPOSED_OUTPUT_MEMCFG"],
+                )
+            )
+            key_layer[i].deallocate(True)
+
+        if llm_mode == "prefill":
+            if self.model_config["NUM_DEVICES"] == 4:
+                attn_weights = self.prefill_grouped_attention_matmul_for_4_chips(
+                    query_layer,
+                    key_layer_transposed,
+                    output_mem_config=self.model_config["PREFILL_4CHIPS_PRE_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                )
+            elif self.model_config["NUM_DEVICES"] == 8:
+                attn_weights = []
+                for i in range(len(key_layer_transposed)):
+                    key_layer_transposed[i] = tt_lib.tensor.sharded_to_interleaved(
+                        key_layer_transposed[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                    )
+                for i in range(len(query_layer)):
+                    attn_weights.append(
+                        tt_lib.tensor.matmul(
+                            query_layer[i],
+                            key_layer_transposed[i],
+                            output_mem_config=self.model_config["PRE_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                        )
+                    )
+                    query_layer[i].deallocate(True)
+                    key_layer_transposed[i].deallocate(True)
+
+        elif llm_mode == "decode":
+            attn_weights = []
+            for i in range(len(query_layer)):
+                attn_weights.append(
+                    tt_lib.operations.primary.transformers.group_attn_matmul(
+                        query_layer[i],
+                        key_layer_transposed[i],
+                        compute_with_storage_grid_size=self.devices[i].compute_with_storage_grid_size(),
+                        output_mem_config=self.model_config["PRE_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                        output_dtype=self.model_config["PRE_SOFTMAX_MM_OUTPUT_DTYPE"],  # Must be BFLOAT16
+                    )
+                )
+                query_layer[i].deallocate(True)
+                key_layer_transposed[i].deallocate(True)
+
+        ###############
+        ### SOFTMAX ###
+        ###############
+        softmax_progcfg = self.model_config["SOFTMAX_PROGCFG"]
+        if llm_mode == "prefill":
+            softmax_progcfg.block_w = (
+                q_len // 32
+            )  # TODO: We can directly set this for prefill model config, but it might be confusing...
+        elif llm_mode == "decode":
+            softmax_progcfg.block_w = padded_layer_past_len // 32
+        for i in range(len(attn_weights)):
+            attn_weights[i] = tt_lib.operations.primary.transformers.scale_mask_softmax_in_place(
+                attn_weights[i],
+                self.scalar,
+                attention_mask[i],
+                program_config=self.model_config["SOFTMAX_PROGCFG"],
+                is_causal_mask=True,
+            )
+
+        ######################
+        ### V CACHE UPDATE ###
+        ######################
+        if llm_mode == "prefill":
+            for i in range(len(layer_past[1])):
+                tt_lib.tensor.fill_cache(layer_past[1][i], value_layer[i], user_id)
+
+        elif llm_mode == "decode":
+            # Update kv_cache in place
+            for i in range(len(value_layer)):
+                tt_lib.tensor.update_cache(layer_past[1][i], value_layer[i], layer_past_len)
+                value_layer[i].deallocate(True)
+            for i in range(len(layer_past[1])):
+                value_layer[i] = tt_lib.tensor.unpad(
+                    layer_past[1][i],
+                    [0, 0, 0, 0],
+                    [
+                        batch - 1,
+                        self.num_kv_heads // len(self.devices) - 1,
+                        padded_layer_past_len - 1,
+                        self.head_dim - 1,
+                    ],
+                    output_mem_config=self.model_config["DEFAULT_MEMCFG"],
+                )
+            for i in range(len(value_layer)):
+                value_layer[i] = tt_lib.tensor.interleaved_to_sharded(
+                    value_layer[i], sharded_mem_config=kv_cache_memcfg
+                )
+
+        layer_present = layer_past if use_cache else None
+
+        ########################
+        ### POST-SOFTMAX MM ###
+        ########################
+        if llm_mode == "prefill":
+            if self.model_config["NUM_DEVICES"] == 4:
+                attn_output = self.prefill_grouped_attention_matmul_for_4_chips(
+                    attn_weights,
+                    value_layer,
+                    output_mem_config=self.model_config["PREFILL_4CHIPS_POST_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                )
+            elif self.model_config["NUM_DEVICES"] == 8:
+                attn_output = []
+                for i in range(len(value_layer)):
+                    value_layer[i] = tt_lib.tensor.sharded_to_interleaved(
+                        value_layer[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                    )
+                for i in range(len(attn_weights)):
+                    attn_output.append(
+                        tt_lib.tensor.matmul(
+                            attn_weights[i],
+                            value_layer[i],
+                            output_mem_config=self.model_config["POST_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                        )
+                    )
+                    attn_weights[i].deallocate(True)
+                    value_layer[i].deallocate(True)
+
+        elif llm_mode == "decode":
+            attn_output = []
+            for i in range(len(attn_weights)):
+                attn_output.append(
+                    tt_lib.operations.primary.transformers.group_attn_matmul(
+                        attn_weights[i],
+                        value_layer[i],
+                        compute_with_storage_grid_size=self.devices[i].compute_with_storage_grid_size(),
+                        output_mem_config=self.model_config["POST_SOFTMAX_MM_OUTPUT_MEMCFG"],
+                        output_dtype=self.model_config["POST_SOFTMAX_MM_OUTPUT_DTYPE"],  # Must be BFLOAT16
+                    )
+                )
+                attn_weights[i].deallocate(True)
+                value_layer[i].deallocate(True)
+
+        #########################
+        ### ATTENTION SELFOUT ###
+        #########################
+        for i in range(len(attn_output)):
+            attn_output[i] = tt_lib.tensor.nlp_concat_heads(
+                attn_output[i],
+                output_mem_config=self.model_config["CONCAT_HEADS_OUTPUT_MEMCFG"],
+            )
+        for i in range(len(attn_output)):
+            attn_output[i] = tt_lib.tensor.sharded_to_interleaved(
+                attn_output[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+            )
+
+        attn_output = tt_lib.tensor.all_gather(
+            attn_output,
+            dim=3,
+            num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
+            output_mem_config=self.model_config["DEFAULT_MEMCFG"],
+        )
+
+        for i in range(len(attn_output)):
+            attn_output[i] = tt_lib.tensor.interleaved_to_sharded(
+                attn_output[i], sharded_mem_config=self.model_config["ATTN_ALL_GATHER_OUTPUT_MEMCFG"]
+            )
+        for i in range(len(attn_output)):
+            attn_output[i] = tt_lib.operations.primary.matmul_1d(
+                attn_output[i],
+                self.dense_weights[i],
+                program_config=self.model_config["SELFOUT_MM_PROGCFG"],
+                output_mem_config=self.model_config["SELFOUT_MM_OUTPUT_MEMCFG"],
+                output_dtype=self.model_config["SELFOUT_MM_OUTPUT_DTYPE"],
+                compute_kernel_config=self.model_config["COMPUTE_KERNEL_CONFIG"],
             )
 
         return attn_output, layer_present

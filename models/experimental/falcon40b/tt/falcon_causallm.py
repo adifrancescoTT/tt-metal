@@ -83,6 +83,39 @@ class TtFalconCausalLM(TtFalconModelShared):
         layer_past_len: int = 0,
         use_cache: bool = False,
     ) -> tt_lib.tensor.Tensor:
+        if llm_mode == "prefill":
+            return self.fwd_prefill_causallm(
+                input_embeddings=input_embeddings,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                use_cache=use_cache,
+            )
+        elif llm_mode == "decode":
+            return self.fwd_decode_causallm(
+                input_embeddings=input_embeddings,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                use_cache=use_cache,
+            )
+        else:
+            assert False
+
+    def fwd_prefill_causallm(
+        self,
+        input_embeddings: tt_lib.tensor.Tensor,
+        llm_mode: str,
+        attention_mask: tt_lib.tensor.Tensor = None,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[Tuple[tt_lib.tensor.Tensor]]] = None,
+        layer_past_len: int = 0,
+        use_cache: bool = False,
+    ) -> tt_lib.tensor.Tensor:
         hidden_states, presents = super().__call__(
             input_embeddings=input_embeddings,
             attention_mask=attention_mask,
@@ -109,6 +142,42 @@ class TtFalconCausalLM(TtFalconModelShared):
                     output_mem_config=self.model_config["LM_HEAD_MM_OUTPUT_MEMCFG"],
                     output_dtype=self.model_config["LM_HEAD_MM_OUTPUT_DTYPE"],
                     overwrite_per_core_k=1,  # TODO: can we increase this?
+                )
+            )
+            hidden_states[i].deallocate(True)
+
+        return lm_logits, presents
+
+    def fwd_decode_causallm(
+        self,
+        input_embeddings: tt_lib.tensor.Tensor,
+        llm_mode: str,
+        attention_mask: tt_lib.tensor.Tensor = None,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[Tuple[tt_lib.tensor.Tensor]]] = None,
+        layer_past_len: int = 0,
+        use_cache: bool = False,
+    ) -> tt_lib.tensor.Tensor:
+        hidden_states, presents = super().__call__(
+            input_embeddings=input_embeddings,
+            attention_mask=attention_mask,
+            llm_mode=llm_mode,
+            user_id=user_id,
+            layer_past=layer_past,
+            layer_past_len=layer_past_len,
+            use_cache=use_cache,
+        )
+
+        lm_logits = []
+        for i in range(len(hidden_states)):
+            lm_logits.append(
+                tt_lib.operations.primary.matmul_1d(
+                    hidden_states[i],
+                    self.lm_head_weights[i],
+                    program_config=self.model_config["LM_HEAD_MM_PROGCFG"],
+                    output_mem_config=self.model_config["LM_HEAD_MM_OUTPUT_MEMCFG"],
+                    output_dtype=self.model_config["LM_HEAD_MM_OUTPUT_DTYPE"],
+                    compute_kernel_config=self.model_config["COMPUTE_KERNEL_CONFIG"],
                 )
             )
             hidden_states[i].deallocate(True)

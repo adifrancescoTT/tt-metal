@@ -174,6 +174,47 @@ class TtFalconDecoderLayer:
     ) -> Tuple[tt_lib.tensor.Tensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """Input shape: [batch, 1, seq_len, hidden_size]"""
 
+        if llm_mode == "prefill":
+            return self.fwd_prefill(
+                hidden_states=hidden_states,
+                alibi=alibi,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        elif llm_mode == "decode":
+            return self.fwd_decode(
+                hidden_states=hidden_states,
+                alibi=alibi,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        else:
+            assert False
+
+    def fwd_prefill(
+        self,
+        hidden_states: tt_lib.tensor.Tensor,
+        alibi: torch.Tensor,
+        attention_mask: torch.Tensor,
+        llm_mode: str,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[tt_lib.tensor.Tensor]] = None,
+        layer_past_len: int = 0,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[tt_lib.tensor.Tensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """Input shape: [batch, 1, seq_len, hidden_size]"""
+
         assert not output_attentions
 
         if self.model_config["WORD_EMBEDDING_OUTPUT_MEMCFG"].is_sharded():
@@ -276,7 +317,7 @@ class TtFalconDecoderLayer:
 
         # MLP
         # mlp will deallocate layernorm_output
-        mlp_output = self.mlp(mlp_ln_output)
+        mlp_output = self.mlp(mlp_ln_output, llm_mode=llm_mode)
 
         # dropout_add
         # For inference, this is just add
@@ -383,3 +424,120 @@ class TtFalconDecoderLayer:
         for i in range(self.num_devices):
             xs_output_cat[i] = tt_lib.tensor.typecast(xs_output_cat[i], self.model_config["LN_MLP_OUTPUT_DTYPE"])
         return xs_output_cat
+
+    def fwd_decode(
+        self,
+        hidden_states: tt_lib.tensor.Tensor,
+        alibi: torch.Tensor,
+        attention_mask: torch.Tensor,
+        llm_mode: str,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[tt_lib.tensor.Tensor]] = None,
+        layer_past_len: int = 0,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+    ) -> Tuple[tt_lib.tensor.Tensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        """Input shape: [batch, 1, seq_len, hidden_size]"""
+
+        assert not output_attentions
+
+        replicated_hidden_states = []
+        for i in range(len(hidden_states)):
+            replicated_hidden_states.append(
+                tt_lib.tensor.sharded_to_interleaved(
+                    hidden_states[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+                )
+            )
+        replicated_hidden_states = tt_lib.tensor.all_gather(
+            replicated_hidden_states,
+            num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
+            dim=3,
+            output_mem_config=self.model_config["DEFAULT_MEMCFG"],
+        )
+        for i in range(len(replicated_hidden_states)):
+            replicated_hidden_states[i] = tt_lib.tensor.interleaved_to_sharded(
+                replicated_hidden_states[i], sharded_mem_config=self.model_config["DECODER_ALL_GATHER_OUTPUT_MEMCFG"]
+            )
+
+        attn_ln_output = []
+        mlp_ln_output = []
+        for i in range(len(replicated_hidden_states)):
+            attn_ln_output.append(
+                tt_lib.operations.primary.layernorm(
+                    replicated_hidden_states[i],
+                    self.layernorm_eps,
+                    self.ln_attn_gamma[i],
+                    self.ln_attn_beta[i],
+                    self.model_config["LN_ATTN_OUTPUT_MEMCFG"],
+                    self.model_config["LN_ATTN_PROGCFG"],
+                )
+            )
+        # mlp_ln is in place, no need to deallocate original
+        for i in range(len(replicated_hidden_states)):
+            mlp_ln_output.append(
+                tt_lib.operations.primary.layernorm(
+                    replicated_hidden_states[i],
+                    self.layernorm_eps,
+                    self.ln_mlp_gamma[i],
+                    self.ln_mlp_beta[i],
+                    self.model_config["LN_MLP_OUTPUT_MEMCFG"],
+                    self.model_config["LN_MLP_PROGCFG"],
+                )
+            )
+
+        residual = hidden_states
+
+        # Self Attention
+        attn_outputs = self.self_attn(
+            hidden_states=attn_ln_output,
+            alibi=alibi,
+            attention_mask=attention_mask,
+            llm_mode=llm_mode,
+            user_id=user_id,
+            layer_past=layer_past,
+            layer_past_len=layer_past_len,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        attention_output, outputs = attn_outputs[0], attn_outputs[1:]
+
+        output = []
+
+        # Add attn output to residiual first in place to save memory
+        # Note that this is only correct in inference when dropout is disabled
+        for i in range(len(residual)):
+            output.append(
+                tt_lib.operations.primary.add(
+                    residual[i],
+                    attention_output[i],
+                    output_mem_config=self.model_config["PARALLEL_ATTN_ADD_OUTPUT_MEMCFG"],
+                    in_place=True,
+                )
+            )
+            attention_output[i].deallocate(True)
+
+        # MLP
+        # mlp will deallocate layernorm_output
+        mlp_output = self.mlp(mlp_ln_output, llm_mode=llm_mode)
+
+        # dropout_add
+        # For inference, this is just add
+        for i in range(len(output)):
+            output[i] = tt_lib.operations.primary.add(
+                output[i],
+                mlp_output[i],
+                output_mem_config=self.model_config["DROPOUT_ADD_OUTPUT_MEMCFG"],
+                in_place=True,
+            )
+
+            mlp_output[i].deallocate(True)
+
+        if use_cache:
+            outputs = (output,) + outputs
+        else:
+            outputs = (
+                output,
+                (),
+            )  # Outputs should be empty if we ignore layer_past as well
+
+        return outputs

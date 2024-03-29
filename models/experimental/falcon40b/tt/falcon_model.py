@@ -244,6 +244,39 @@ class TtFalconModelShared:
         layer_past_len: int = 0,
         use_cache: bool = False,
     ) -> tt_lib.tensor.Tensor:
+        if llm_mode == "prefill":
+            return self.fwd_prefill(
+                input_embeddings=input_embeddings,
+                llm_mode=llm_mode,
+                attention_mask=attention_mask,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                use_cache=use_cache,
+            )
+        elif llm_mode == "decode":
+            return self.fwd_decode(
+                input_embeddings=input_embeddings,
+                llm_mode=llm_mode,
+                attention_mask=attention_mask,
+                user_id=user_id,
+                layer_past=layer_past,
+                layer_past_len=layer_past_len,
+                use_cache=use_cache,
+            )
+        else:
+            assert False
+
+    def fwd_prefill(
+        self,
+        input_embeddings: tt_lib.tensor.Tensor,
+        llm_mode: str,
+        attention_mask: tt_lib.tensor.Tensor = None,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[Tuple[tt_lib.tensor.Tensor]]] = None,
+        layer_past_len: int = 0,
+        use_cache: bool = False,
+    ) -> tt_lib.tensor.Tensor:
         layer_output = input_embeddings
         presents = ()
         for idx, layer in enumerate(self.layers):
@@ -287,6 +320,60 @@ class TtFalconModelShared:
         layer_output = convert_to_layout(
             layer_output, self.model_config["LN_F_OUTPUT_MEMCFG"], self.model_config["DEFAULT_MEMCFG"]
         )
+
+        return layer_output, presents
+
+    def fwd_decode(
+        self,
+        input_embeddings: tt_lib.tensor.Tensor,
+        llm_mode: str,
+        attention_mask: tt_lib.tensor.Tensor = None,
+        user_id: int = 0,
+        layer_past: Optional[Tuple[Tuple[tt_lib.tensor.Tensor]]] = None,
+        layer_past_len: int = 0,
+        use_cache: bool = False,
+    ) -> tt_lib.tensor.Tensor:
+        layer_output = input_embeddings
+        presents = ()
+        for idx, layer in enumerate(self.layers):
+            layer_output = layer(
+                hidden_states=layer_output,
+                alibi=None,
+                attention_mask=attention_mask,
+                llm_mode=llm_mode,
+                user_id=user_id,
+                layer_past=layer_past[idx],
+                layer_past_len=layer_past_len,
+                use_cache=use_cache,
+            )
+            presents += layer_output[1:]
+            layer_output = layer_output[0]
+
+        for i in range(len(layer_output)):
+            layer_output[i] = tt_lib.tensor.sharded_to_interleaved(
+                layer_output[i], output_mem_config=self.model_config["DEFAULT_MEMCFG"]
+            )
+        layer_output = tt_lib.tensor.all_gather(
+            layer_output,
+            dim=3,
+            num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
+            output_mem_config=self.model_config["DEFAULT_MEMCFG"],
+        )
+        for i in range(len(layer_output)):
+            layer_output[i] = tt_lib.tensor.interleaved_to_sharded(
+                layer_output[i], sharded_mem_config=self.model_config["FINAL_ALL_GATHER_OUTPUT_MEMCFG"]
+            )
+
+        # apply final norm layer
+        for i in range(len(layer_output)):
+            layer_output[i] = tt_lib.operations.primary.layernorm(
+                layer_output[i],
+                self.layernorm_eps,
+                self.layernorm_gamma[i],
+                self.layernorm_beta[i],
+                self.model_config["LN_F_OUTPUT_MEMCFG"],
+                self.model_config["LN_F_PROGCFG"],
+            )
 
         return layer_output, presents
 
