@@ -98,6 +98,7 @@ class cross_attention:
             parameters.kv["weight"] = concatenate_qkv(None, parameters.to_k.weight, parameters.to_v.weight)
             parameters.to_q.weight = weight_to_bfp8(parameters.to_q.weight)
 
+        parameters.to_out[0].bias = ttnn.unsqueeze_to_4D(parameters.to_out[0].bias)
         self.parameters = parameters
         self.device = device
 
@@ -178,6 +179,9 @@ class cross_attention:
         )
         self.height_sharded_memory_config = ttl.tensor.MemoryConfig(
             memory_layout=ttl.tensor.TensorMemoryLayout.HEIGHT_SHARDED, buffer_type=ttl.tensor.BufferType.L1
+        )
+        self.width_sharded_memory_config = ttl.tensor.MemoryConfig(
+            memory_layout=ttl.tensor.TensorMemoryLayout.WIDTH_SHARDED, buffer_type=ttl.tensor.BufferType.L1
         )
 
         self.compute_kernel_config = ttl.tensor.WormholeComputeKernelConfig(
@@ -366,7 +370,6 @@ class cross_attention:
                 output_mem_config,
             )
             # attention_scores = ttl.tensor.move_sharded(attention_scores)
-            print(attention_scores.shape)
             softmax_program_config = ttl.operations.primary.transformers.SoftmaxShardedMultiCoreProgramConfig(
                 compute_with_storage_grid_size=(8, 8),
                 subblock_w=1,
@@ -448,6 +451,81 @@ class cross_attention:
         )
         return attention_scores
 
+    def out(self, hidden_states):
+        size = hidden_states.shape[-2] // 2  # 2 is the batch size
+
+        grid_sizes = {4096: (8, 8), 1024: (8, 8), 256: (8, 5), 64: (8, 5)}
+        grid_sizes = {4096: (8, 8), 1024: (8, 4), 256: (8, 5), 64: (4, 8)}
+        shard_directions = {
+            4096: ttl.tensor.TensorMemoryLayout.HEIGHT_SHARDED,
+            1024: ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+            256: ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+            64: ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+        }
+        out_subblock_hs = {256: 8, 64: 4}
+
+        grid_size = grid_sizes[size]
+        num_cores = grid_size[0] * grid_size[1]
+        B, M, K, N = 1, hidden_states.shape[-2], hidden_states.shape[-1], self.parameters.to_out[0].weight.shape[-1]
+
+        hs = shard_directions[size] == ttl.tensor.TensorMemoryLayout.HEIGHT_SHARDED
+        if hs:
+            hidden_states = ttl.tensor.interleaved_to_sharded(
+                hidden_states,
+                grid_size,
+                [B * M // num_cores, K],
+                ttl.tensor.TensorMemoryLayout.HEIGHT_SHARDED,
+                ttl.tensor.ShardOrientation.ROW_MAJOR,
+            )
+            output_mem_config = self.height_sharded_memory_config
+            program_config = ttl.operations.primary.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+                compute_with_storage_grid_size=grid_size,
+                in0_block_w=K // 32 if hs else 1,
+                per_core_M=B * M // num_cores // 32 if hs else B * M // 32,
+                per_core_N=N // 32 if hs else N // num_cores // 32,
+                out_subblock_h=1 if hs else out_subblock_hs[size],
+                out_subblock_w=2 if hs else 1,
+                fuse_batch=True,
+                fused_activation=None,
+                mcast_in0=False if hs else True,
+            )
+        else:
+            hidden_states = ttl.tensor.interleaved_to_sharded(
+                hidden_states,
+                grid_size,
+                [B * M // grid_size[0], K // grid_size[1]],
+                ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+                ttl.tensor.ShardOrientation.COL_MAJOR,
+            )
+            output_mem_config = self.block_sharded_memory_config
+            Nt = N // 32
+            G = grid_size[1]
+            per_core_N = (Nt - 1) // (G - 1) if Nt != 16 else 4
+            program_config = ttl.operations.primary.MatmulMultiCoreReuseMultiCastProgramConfig(
+                compute_with_storage_grid_size=grid_size,
+                in0_block_w=K // grid_size[1] // 32,
+                out_subblock_h=1,
+                out_subblock_w=1,
+                per_core_M=M // grid_size[0] // 32,
+                per_core_N=per_core_N,
+                fused_activation=None,
+                transpose_mcast=True,
+            )
+
+        # TODO: bug in MM means these sizes need to be interleaved for now
+        if size == 256 or size == 1024:
+            output_mem_config = self.l1_interleaved_memory_config
+        hidden_states = ttl.operations.primary.matmul(
+            hidden_states,
+            self.parameters.to_out[0].weight,
+            bias=self.parameters.to_out[0].bias,
+            program_config=program_config,
+            output_mem_config=output_mem_config,
+            output_dtype=ttl.tensor.DataType.BFLOAT8_B,
+            compute_kernel_config=self.compute_kernel_config,
+        )
+        return hidden_states
+
     def __call__(
         self,
         hidden_states,
@@ -503,7 +581,7 @@ class cross_attention:
             ttnn.deallocate(qkv_out)
             attention_mask = self.attention_masks[key.shape[-1]]
         else:
-            if hidden_states.shape[-2] == 8092:
+            if hidden_states.shape[-2] == 8192:
                 hidden_states = ttnn.to_memory_config(hidden_states, ttnn.L1_MEMORY_CONFIG)
 
             grid_size = self.grid_sizes[hidden_states.shape[-2]]
@@ -584,17 +662,19 @@ class cross_attention:
         if hidden_states.shape.with_tile_padding()[-1] != hidden_states.shape[-1]:
             hidden_states = hidden_states[:, :, : hidden_states.shape[-1]]
 
-        hidden_states = ttnn.linear(
-            hidden_states,
-            self.parameters.to_out[0].weight,
-            bias=self.parameters.to_out[0].bias,
-            core_grid=hidden_states.device().core_grid,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=ttnn.bfloat8_b,
-        )
+        B, M, K, N = 1, hidden_states.shape[-2], hidden_states.shape[-1], self.parameters.to_out[0].weight.shape[-1]
+        hidden_states = ttnn.reshape(hidden_states, (1, 1, 2 * hidden_states.shape[-2], hidden_states.shape[-1]))
+        hidden_states = self.out(hidden_states)
+        # hidden_states = ttnn.linear(
+        #     hidden_states,
+        #     self.parameters.to_out[0].weight,
+        #     bias=self.parameters.to_out[0].bias,
+        #     core_grid=hidden_states.device().core_grid,
+        #     memory_config=ttnn.L1_MEMORY_CONFIG,
+        #     dtype=ttnn.bfloat8_b,
+        # )
 
         if len(hidden_states.shape) == 3:
             hidden_states = unsqueeze_to_4D(hidden_states)
 
-        hidden_states = ttnn.reshape(hidden_states, (1, 1, 2 * hidden_states.shape[-2], hidden_states.shape[-1]))
         return hidden_states

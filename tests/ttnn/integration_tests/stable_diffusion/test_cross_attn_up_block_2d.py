@@ -289,6 +289,7 @@ def test_cross_attn_up_block_2d_512x512(
     res2 = ttnn.to_layout(res2, ttnn.TILE_LAYOUT)
     res2 = ttnn.to_device(res2, device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
+    temb = temb.permute(2, 0, 1, 3)  # pre-permute temb
     temb = ttnn.from_torch(temb, ttnn.bfloat16)
     temb = ttnn.to_layout(temb, ttnn.TILE_LAYOUT)
     temb = ttnn.to_device(temb, device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
