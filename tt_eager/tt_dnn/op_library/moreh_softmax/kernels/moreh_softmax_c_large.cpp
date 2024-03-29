@@ -48,6 +48,8 @@ void MAIN {
                     PACK(( llk_pack_reconfig_l1_acc(0) )); // acc off
                 } else {
                     PACK(( llk_pack_reconfig_l1_acc(1) )); // acc on
+                    cb_wait_front(cb_add, onetile);
+                    cb_pop_front(cb_add, onetile);
                 }
                 PACK(( pack_reconfig_data_format(cb_add) ));
                 pack_tile(dst0, cb_add);

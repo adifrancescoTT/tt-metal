@@ -12,7 +12,7 @@ from loguru import logger
 import ttnn
 from models.utility_functions import is_wormhole_b0
 
-torch.set_printoptions(threshold=1000000)
+torch.set_printoptions(threshold=1000000, linewidth=1000000000000)
 
 
 @pytest.mark.parametrize(
