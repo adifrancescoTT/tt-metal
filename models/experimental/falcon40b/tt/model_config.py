@@ -384,9 +384,6 @@ def get_decode_model_config(model_config_str, input_shape, num_devices):
             subblock_w=8,
             block_h=1,
             block_w=8,
-            math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-            im_data_format=ttl.tensor.DataType.BFLOAT16,
-            out_data_format=model_config["LN_ATTN_OUTPUT_DTYPE"],
             inplace=False,
         )
         model_config["LN_MLP_PROGCFG"] = ttl.operations.primary.LayerNormShardedMultiCoreProgramConfig(
@@ -394,9 +391,6 @@ def get_decode_model_config(model_config_str, input_shape, num_devices):
             subblock_w=8,
             block_h=1,
             block_w=8,
-            math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-            im_data_format=ttl.tensor.DataType.BFLOAT16,
-            out_data_format=model_config["LN_MLP_OUTPUT_DTYPE"],
             inplace=True,
         )
         model_config["LN_MLP_OUTPUT_MEMCFG"] = ttl.tensor.MemoryConfig(
@@ -542,8 +536,6 @@ def get_decode_model_config(model_config_str, input_shape, num_devices):
                 subblock_w=1,
                 block_h=row_height // 32,
                 block_w=1,  # Dynamic
-                math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-                im_data_format=ttl.tensor.DataType.BFLOAT16,
             )
         elif num_devices == 8:
             model_config["SOFTMAX_PROGCFG"] = ttl.operations.primary.transformers.SoftmaxShardedMultiCoreProgramConfig(
@@ -551,8 +543,6 @@ def get_decode_model_config(model_config_str, input_shape, num_devices):
                 subblock_w=1,
                 block_h=row_height // 32,
                 block_w=1,  # Dynamic
-                math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-                im_data_format=ttl.tensor.DataType.BFLOAT16,
             )
         model_config["POST_SOFTMAX_MM_OUTPUT_MEMCFG"] = HEIGHT_SHARDED_MEMCFG
         model_config["CONCAT_HEADS_OUTPUT_MEMCFG"] = WIDTH_SHARDED_MEMCFG
@@ -695,9 +685,6 @@ def get_decode_model_config(model_config_str, input_shape, num_devices):
             subblock_w=8,
             block_h=1,
             block_w=8,
-            math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-            im_data_format=ttl.tensor.DataType.BFLOAT16,
-            out_data_format=model_config["LN_F_OUTPUT_DTYPE"],
             inplace=True,
         )
 
@@ -860,8 +847,6 @@ def get_prefill_model_config(model_config_str, input_shape, num_devices):
         subblock_w=1,
         block_h=row_height // 32,
         block_w=1,  # Dynamic
-        math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-        im_data_format=ttl.tensor.DataType.BFLOAT16,
     )
 
     # Dense Out
@@ -1010,9 +995,6 @@ def get_sharded_layernorm_specs_for_seqlen(
         subblock_w=8,
         block_h=num_tiles_per_core_h,
         block_w=num_tiles_per_core_w,
-        math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-        im_data_format=ttl.tensor.DataType.BFLOAT16,
-        out_data_format=dtype,
         inplace=False,
     )
     layernorm_block_sharded_prg_config_inplace = ttl.operations.primary.LayerNormShardedMultiCoreProgramConfig(
@@ -1020,9 +1002,6 @@ def get_sharded_layernorm_specs_for_seqlen(
         subblock_w=8,
         block_h=num_tiles_per_core_h,
         block_w=num_tiles_per_core_w,
-        math_fidelity=ttl.tensor.MathFidelity.HiFi4,
-        im_data_format=ttl.tensor.DataType.BFLOAT16,
-        out_data_format=dtype,
         inplace=True,
     )
 
