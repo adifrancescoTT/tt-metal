@@ -343,6 +343,9 @@ class TtFalconAttention:
 
         return attn_weights
 
+    def set_model_config(self, model_config):
+        self.model_config = model_config
+
     def __call__(
         self,
         hidden_states: tt_lib.tensor.Tensor,

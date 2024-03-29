@@ -346,7 +346,7 @@ def run_falcon_demo_kv(
     ### First run decode stage with compile ###
     # Update model_config for decode
     model_config = get_model_config(model_config_str_for_decode, "decode", [batch_size, 1], len(devices))
-    tt_FalconCausalLM.model_config = model_config
+    tt_FalconCausalLM.set_model_config(model_config)
 
     attention_mask_memconfig = model_config["ATTN_MASK_MEMCFG"]
     if attention_mask_memconfig.is_sharded():
