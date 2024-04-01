@@ -53,6 +53,10 @@ class AllGatherConfig {
 
         mode(choose_all_gather_mode(input_tensor, output_tensor, dim))
     {
+        // "duplicate" directions are a short hand to enable linear/mesh all-gather topologies with
+        // less code-changes. Ideally a new concept is added amongst "num_eth_buffers", "num_workers_per_link", etc.
+        uint32_t num_duplicate_directions = topology == all_gather_op::Topology::Ring ? 1 : 2;
+
         constexpr uint32_t total_l1_buffer_space = eth_l1_mem::address_map::MAX_L1_LOADING_SIZE - eth_l1_mem::address_map::ERISC_L1_UNRESERVED_BASE;
 
         this->is_sharded = input_tensor.is_sharded();
@@ -66,16 +70,17 @@ class AllGatherConfig {
             }
             log_trace(tt::LogOp, "this->num_buffers: {}", this->num_eth_buffers);
         }
+
         this->num_workers_per_link = this->num_eth_buffers;
         this->eth_sems_l1_base_byte_address = this->erisc_handshake_address + 16;
-        this->semaphore_offset = this->semaphore_size * this->num_eth_buffers; // TODO: Remove this once dedicated semaphore space for user kernels are added
+        this->semaphore_offset = this->semaphore_size * this->num_eth_buffers * num_duplicate_directions; // TODO: Remove this once dedicated semaphore space for user kernels are added
         this->eth_buffers_l1_base_byte_address = this->eth_sems_l1_base_byte_address + this->semaphore_offset;
 
         uint32_t const page_size = input_tensor.buffer()->page_size();
-        this->eth_buffer_size = round_down((total_l1_buffer_space - this->semaphore_offset) / this->num_eth_buffers, page_size);
+        this->eth_buffer_size = round_down((total_l1_buffer_space - this->semaphore_offset) / (this->num_eth_buffers * num_duplicate_directions), page_size);
 
-        TT_FATAL(eth_buffer_size == 0 or num_eth_buffers <= eth_l1_mem::address_map::MAX_NUM_CONCURRENT_TRANSACTIONS);
-        TT_FATAL(this->eth_buffer_size * this->num_eth_buffers + this->semaphore_offset <= total_l1_buffer_space);
+        TT_FATAL(eth_buffer_size == 0 or (this->num_eth_buffers * num_duplicate_directions) <= eth_l1_mem::address_map::MAX_NUM_CONCURRENT_TRANSACTIONS);
+        TT_FATAL(this->eth_buffer_size * (this->num_eth_buffers * num_duplicate_directions) + this->semaphore_offset <= total_l1_buffer_space);
 
         // FIXME: dynamically select the number and size of each buffer based on tensor attributes, link count, ring size, etc.
         // Erisc is able to keep up with workers up to around 17-20 GBps bidirectional (numbers still being locked down)

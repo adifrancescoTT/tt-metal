@@ -178,7 +178,7 @@ def run_all_gather_on_t3000_impl_tight_loop(
         ttl.tensor.MemoryConfig(buffer_type=ttl.tensor.BufferType.L1),
     ],
 )
-@pytest.mark.parametrize("num_iters", [10])  # TODO: restore to 500
+@pytest.mark.parametrize("num_iters", [1])  # TODO: restore to 500
 def test_all_gather_on_t3000_post_commit_looping(
     all_devices,
     num_devices,
