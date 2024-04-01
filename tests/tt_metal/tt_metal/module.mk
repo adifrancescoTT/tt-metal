@@ -40,6 +40,8 @@ TT_METAL_TESTS += \
 		 tests/tt_metal/test_matmul_single_tile_bfp8b \
 		 tests/tt_metal/test_matmul_single_tile_output_in_l1 \
 		 tests/tt_metal/test_dram_loopback_single_core \
+		 tests/tt_metal/test_same_data_format_output_cbs \
+		 tests/tt_metal/test_mixed_data_format_output_cbs \
 		 tests/tt_metal/test_datacopy_bfp8b \
 		 tests/tt_metal/test_datacopy \
 		 tests/tt_metal/test_datacopy_output_in_l1 \
