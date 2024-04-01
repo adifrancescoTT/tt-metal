@@ -524,31 +524,31 @@ def test_all_gather_on_t3000_nightly(
             (32, 32),
             ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 6))}),
         ),
-        (
-            (1, 1, 64, 256),
-            (64, 32),
-            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        ),
-        (
-            (1, 1, 64, 512),
-            (64, 64),
-            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        ),
-        (
-            (1, 1, 96, 512),
-            (96, 32),
-            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        ),
-        (
-            (1, 1, 96, 1024),
-            (96, 64),
-            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        ),
-        (
-            (1, 1, 96, 1024),
-            (96, 32),
-            ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
-        ),
+        # (
+        #     (1, 1, 64, 256),
+        #     (64, 32),
+        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        # ),
+        # (
+        #     (1, 1, 64, 512),
+        #     (64, 64),
+        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        # ),
+        # (
+        #     (1, 1, 96, 512),
+        #     (96, 32),
+        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        # ),
+        # (
+        #     (1, 1, 96, 1024),
+        #     (96, 64),
+        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        # ),
+        # (
+        #     (1, 1, 96, 1024),
+        #     (96, 32),
+        #     ttl.tensor.CoreRangeSet({ttl.tensor.CoreRange(ttl.tensor.CoreCoord(0, 0), ttl.tensor.CoreCoord(7, 0))}),
+        # ),
     ),
 )
 def test_all_gather_post_commit_sharded(

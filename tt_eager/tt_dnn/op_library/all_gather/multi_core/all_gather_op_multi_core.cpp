@@ -101,10 +101,12 @@ class AllGatherOpShardedTensorConfig final : public AllGatherOpTensorConfig {
     ShardSpec const shard_spec;
 };
 
-operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor& input_tensor, Tensor& output_tensor, const uint32_t dim, const uint32_t num_links, const uint32_t ring_size, const uint32_t ring_index, const chip_id_t receiver_device_id, const chip_id_t sender_device_id) {
+operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor& input_tensor, Tensor& output_tensor, const uint32_t dim, const uint32_t num_links, const uint32_t ring_size, const uint32_t ring_index, const std::optional<chip_id_t> receiver_device_id, const std::optional<chip_id_t> sender_device_id, all_gather_op::Topology topology) {
+    TT_FATAL(!(receiver_device_id == std::nullopt && sender_device_id == std::nullopt), "At least one of receiver_device_id or sender_device_id must be specified");
+    ccl::EriscDataMoverBufferSharingMode edm_buffer_sharing_mode = ccl::EriscDataMoverBufferSharingMode::ROUND_ROBIN;
 
     tt_metal::Program program{};
-    auto const& all_gather_config = AllGatherConfig(input_tensor, output_tensor, dim, ring_size, num_links);
+    auto const& all_gather_config = AllGatherConfig(input_tensor, output_tensor, dim, ring_size, num_links, topology);
 
     auto const& sharding_info = ShardedAllGatherConfig(input_tensor, output_tensor, dim);
     bool enable_print = false; // ring_index == 0
@@ -197,9 +199,9 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
 
     for (uint32_t l = 0; l < num_links; ++l) {
         // Get the cores for the sender and receiver worker cores
-        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id).at(sender_socket_idx + l);
+        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id.value()).at(sender_socket_idx + l);
         eth_sender_cores.push_back(eth_sender_core);
-        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id).at(receiver_socket_idx + l);
+        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id.value()).at(receiver_socket_idx + l);
         eth_receiver_cores.push_back(eth_receiver_core);
     }
 
@@ -291,6 +293,29 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
         eth_buffer_addr += all_gather_config.get_eth_buffer_size();
     }
 
+    std::vector<EriscDatamoverBuilder> clockwise_edm_builders;
+    std::vector<EriscDatamoverBuilder> counter_clockwise_edm_builders;
+    for (uint32_t link = 0; link < num_links; link++) {
+        std::vector<uint32_t> edm_semaphore_addresses; edm_semaphore_addresses.reserve(all_gather_config.get_num_eth_buffers_per_edm());
+        std::vector<uint32_t> edm_buffer_addresses; edm_buffer_addresses.reserve(all_gather_config.get_num_eth_buffers_per_edm());
+
+        uint32_t eth_semaphore_address = all_gather_config.get_eth_sems_l1_base_byte_address();
+        uint32_t eth_buffer_address = all_gather_config.get_eth_buffers_l1_base_byte_address();
+        for (uint32_t b = 0; b < all_gather_config.get_num_eth_buffers_per_edm(); ++b) {
+            edm_semaphore_addresses.push_back(eth_semaphore_address);
+            edm_buffer_addresses.push_back(eth_buffer_address);
+
+            eth_semaphore_address += all_gather_config.get_semaphore_size();
+            eth_buffer_address += all_gather_config.get_eth_buffer_size();
+        }
+
+        clockwise_edm_builders.emplace_back(
+            all_gather_config, edm_semaphore_addresses, edm_buffer_addresses, edm_buffer_sharing_mode);
+        counter_clockwise_edm_builders.emplace_back(
+            all_gather_config, edm_semaphore_addresses, edm_buffer_addresses, edm_buffer_sharing_mode);
+    }
+
+
     for (uint32_t i = 0; i < num_links; ++i) {
         // We can't have overlap between the mcast grid for worker cores for different links since mcasting the semaphore in receiver would corrupt other link semaphores
         // We can have overlap between a link's sender and receiver worker grids if we have the semaphores at different addresses
@@ -321,9 +346,9 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
         auto sender_noc = detail::GetPreferredNOCForDRAMRead(tt::Cluster::instance().arch());
         auto receiver_noc = detail::GetPreferredNOCForDRAMWrite(tt::Cluster::instance().arch());
 
-        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id).at(sender_socket_idx);
+        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id.value()).at(sender_socket_idx);
         eth_sender_cores.push_back(eth_sender_core);
-        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id).at(receiver_socket_idx);
+        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id.value()).at(receiver_socket_idx);
         eth_receiver_cores.push_back(eth_receiver_core);
 
         // Rename this the _channel
@@ -441,92 +466,47 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
             link_buffer_receiver_addresses.push_back(all_gather_config.get_eth_buffers_l1_base_byte_address() + b * all_gather_config.get_eth_buffer_size());
         }
 
-
-        std::vector<uint32_t> edm_clockwise_kernel_rt_args = {
-            static_cast<uint32_t>(all_gather_config.get_erisc_handshake_address()),
-            static_cast<uint32_t>(link_clockwise_sender_channels_offsets.at(i))
-        };
-
-        std::vector<uint32_t> edm_counter_clockwise_kernel_rt_args = {
-            static_cast<uint32_t>(all_gather_config.get_erisc_handshake_address()),
-            static_cast<uint32_t>(link_counter_clockwise_sender_channels_offsets.at(i))
-        };
-
         for (uint32_t b = 0; b < all_gather_config.get_num_eth_buffers_per_edm(); ++b) {
-            // Setup sender direction args
-            auto& edm_kernel_rt_args = all_gather_config.is_buffer_in_clockwise_ring(b) ? edm_clockwise_kernel_rt_args : edm_counter_clockwise_kernel_rt_args;
-            // eth sender args
-            // sender_buffer_address
-            edm_kernel_rt_args.push_back(link_buffer_sender_addresses.at(b));
-
-            // sender_num_messages_to_send
-            edm_kernel_rt_args.push_back(link_buffer_num_messages_to_send.at(b));
-
-            // sender_channel_size
-            edm_kernel_rt_args.push_back(all_gather_config.get_eth_buffer_size());
-
-            // edm_semaphores_base_address -> erisc L1 address
-            edm_kernel_rt_args.push_back(eth_sem_addrs.at(b));
-
-            // worker_semaphore_address
-            edm_kernel_rt_args.push_back(sender_worker_writer_semaphore_addr);
-
-            // sender_num_workers - only 1 per channel right now
             uint32_t num_workers_per_eth_buffer = std::min(workers_per_link, all_gather_config.get_num_eth_buffers_per_edm() - worker_index);
-            edm_kernel_rt_args.push_back(num_workers_per_eth_buffer);
 
-            // for (uint32_t b = 0; b < sender_worker_cores.size(); ++b) {
-            for (uint32_t w = b * all_gather_config.get_num_eth_buffers_per_edm(); w < b * all_gather_config.get_num_eth_buffers_per_edm() + num_workers_per_eth_buffer; ++w) {
-                edm_kernel_rt_args.push_back((uint32_t)(
-                    (device->worker_core_from_logical_core(sender_worker_cores.at(w)).y << 16) |
-                    (device->worker_core_from_logical_core(sender_worker_cores.at(w)).x)
-                ));
+            std::vector<ccl::WorkerXY> sender_worker_coords;
+            std::vector<ccl::WorkerXY> receiver_worker_coords;
+            for (uint32_t w = b * num_workers_per_eth_buffer; w < (b + 1) * num_workers_per_eth_buffer; ++w) {
+                sender_worker_coords.push_back(
+                    ccl::WorkerXY(
+                        device->worker_core_from_logical_core(sender_worker_cores.at(w)).x,
+                        device->worker_core_from_logical_core(sender_worker_cores.at(w)).y));
+                receiver_worker_coords.push_back(
+                    ccl::WorkerXY(
+                        device->worker_core_from_logical_core(receiver_worker_cores.at(w)).x,
+                        device->worker_core_from_logical_core(receiver_worker_cores.at(w)).y));
             }
-            log_trace(tt::LogOp, "sender_worker_writer_semaphore_addr: {}", sender_worker_writer_semaphore_addr);
-            log_trace(tt::LogOp, "edm_kernel_rt_args worker.x: {}", device->worker_core_from_logical_core(sender_worker_cores.at(b)).y);
-            log_trace(tt::LogOp, "edm_kernel_rt_args worker.y: {}", device->worker_core_from_logical_core(sender_worker_cores.at(b)).x);
+
+            auto &sender_edm_builder = all_gather_config.is_buffer_in_clockwise_ring(b) ? clockwise_edm_builders.at(i) : counter_clockwise_edm_builders.at(i);
+            EriscDatamoverBuilder::ChannelBufferInterface const& sender_channel_buffer_info =
+                sender_edm_builder.add_sender_channel(sender_worker_writer_semaphore_addr, link_buffer_num_messages_to_send.at(b), sender_worker_coords);
+
+            auto &receiver_edm_builder = all_gather_config.is_buffer_in_clockwise_ring(b) ? counter_clockwise_edm_builders.at(i) : clockwise_edm_builders.at(i);
+            EriscDatamoverBuilder::ChannelBufferInterface const& receiver_channel_buffer_info =
+                receiver_edm_builder.add_receiver_channel(receiver_worker_semaphore_addr, link_buffer_num_messages_to_send.at(b), receiver_worker_coords);
         }
 
-        // Setup receiver direction args. Clockwise receiver is same offset as sender offset for clockwise direction
-        edm_clockwise_kernel_rt_args.push_back(static_cast<uint32_t>(link_counter_clockwise_receiver_channels_offsets.at(i)));
 
-        edm_counter_clockwise_kernel_rt_args.push_back(static_cast<uint32_t>(link_clockwise_receiver_channels_offsets.at(i)));
+        std::vector<uint32_t> const& edm_clockwise_kernel_rt_args = clockwise_edm_builders.at(i).emit_runtime_args();
+        std::vector<uint32_t> const& edm_counter_clockwise_kernel_rt_args = counter_clockwise_edm_builders.at(i).emit_runtime_args();
 
-        for (uint32_t b = 0; b < all_gather_config.get_num_eth_buffers_per_edm(); ++b) {
-            auto& edm_kernel_rt_args = all_gather_config.is_buffer_in_clockwise_ring(b) ? edm_counter_clockwise_kernel_rt_args : edm_clockwise_kernel_rt_args ;
-            // eth receiver args
-            // sender_buffer_address
-            edm_kernel_rt_args.push_back(link_buffer_receiver_addresses.at(b));
+        log_trace(tt::LogOp, "EDM CLOCKWISE KERNEL RT ARGS: ");
+        clockwise_edm_builders.at(i).dump_to_log();
 
-            // sender_num_messages_to_send
-            edm_kernel_rt_args.push_back(link_buffer_receiver_num_messages_to_send.at(b));
-
-            // sender_channel_size
-            edm_kernel_rt_args.push_back(all_gather_config.get_eth_buffer_size());
-
-            // edm_semaphores_base_address -> erisc L1 address
-            edm_kernel_rt_args.push_back(eth_sem_addrs.at(b));
-
-            // worker_semaphore_address
-            edm_kernel_rt_args.push_back(receiver_worker_semaphore_addr);
-
-            uint32_t num_workers_per_eth_buffer = std::min(workers_per_link, all_gather_config.get_num_eth_buffers_per_edm() - worker_index);
-            // sender_num_workers - only 1 per channel right now
-            edm_kernel_rt_args.push_back(num_workers_per_eth_buffer);
-
-            for (uint32_t w = b * all_gather_config.get_num_eth_buffers_per_edm(); w < b * all_gather_config.get_num_eth_buffers_per_edm() + num_workers_per_eth_buffer; ++w) {
-                edm_kernel_rt_args.push_back((uint32_t)(
-                    (device->worker_core_from_logical_core(receiver_worker_cores.at(w)).y << 16) |
-                    (device->worker_core_from_logical_core(receiver_worker_cores.at(w)).x)
-                ));
-            }
-        }
+        log_trace(tt::LogOp, "EDM COUNTER CLOCKWISE KERNEL RT ARGS: ");
+        counter_clockwise_edm_builders.at(i).dump_to_log();
 
         // 1 Worker per buffer
         for (uint32_t b = 0; b < all_gather_config.get_num_eth_buffers_per_edm(); ++b) {
             uint32_t global_worker_index = all_gather_config.get_num_eth_buffers_per_edm() * i + b;
 
             bool is_clockwise_direction = all_gather_config.is_buffer_in_clockwise_ring(b);
+            TT_ASSERT(is_clockwise_direction && receiver_device_id != std::nullopt || !is_clockwise_direction && sender_device_id != std::nullopt);
 
             // Not fully sure about these two
             uint32_t last_output_page_offset = (num_transfers) * output_page_offset;
@@ -1146,12 +1126,7 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
         }
 
         // Ethernet Kernels
-        std::vector<uint32_t> eth_sender_ct_args = {
-            static_cast<uint32_t>(all_gather_config.get_num_edm_channels_in_clockwise_direction() ? 1 : 0),
-            static_cast<uint32_t>(all_gather_config.get_num_edm_channels_in_counter_clockwise_direction() ? 1 : 0),
-            static_cast<uint32_t>(link_clockwise_sender_num_channels.at(i)),
-            static_cast<uint32_t>(link_counter_clockwise_receiver_num_channels.at(i))
-        };
+        std::vector<uint32_t> eth_sender_ct_args = clockwise_edm_builders.at(i).emit_compile_time_args();
 
         log_trace(tt::LogOp, "EDM sender side link_clockwise_sender_num_channels.at(i) {}", link_clockwise_sender_num_channels.at(i));
         log_trace(tt::LogOp, "EDM sender side link_counter_clockwise_receiver_num_channels.at(i) {}", link_counter_clockwise_receiver_num_channels.at(i));
@@ -1171,12 +1146,7 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
 
         eth_sender_kernels.push_back(eth_sender_kernel);
 
-        std::vector<uint32_t> eth_receiver_ct_args = {
-            static_cast<uint32_t>(all_gather_config.get_num_edm_channels_in_counter_clockwise_direction() ? 1 : 0),
-            static_cast<uint32_t>(all_gather_config.get_num_edm_channels_in_clockwise_direction() ? 1 : 0),
-            static_cast<uint32_t>(link_counter_clockwise_sender_num_channels.at(i)),
-            static_cast<uint32_t>(link_clockwise_receiver_num_channels.at(i))
-        };
+        std::vector<uint32_t> eth_receiver_ct_args = counter_clockwise_edm_builders.at(i).emit_compile_time_args();
 
         auto eth_receiver_kernel = tt_metal::CreateKernel(
             program,
@@ -1260,13 +1230,14 @@ operation::ProgramWithCallbacks all_gather_multi_core_with_workers(const Tensor&
 ////////////////////
 ////////////////////
 
-operation::ProgramWithCallbacks all_gather_full_shard_grid(const Tensor& input_tensor, Tensor& output_tensor, const uint32_t dim, const uint32_t num_links, const uint32_t ring_size, const uint32_t ring_index, const chip_id_t receiver_device_id, const chip_id_t sender_device_id) {
+operation::ProgramWithCallbacks all_gather_full_shard_grid(const Tensor& input_tensor, Tensor& output_tensor, const uint32_t dim, const uint32_t num_links, const uint32_t ring_size, const uint32_t ring_index, const std::optional<chip_id_t> receiver_device_id, const std::optional<chip_id_t> sender_device_id, all_gather_op::Topology topology) {
+    TT_ASSERT(topology == all_gather_op::Topology::Ring, "Only ring topology is currently supported by all gather with multi-tile-high shards");
 
     TT_ASSERT(input_tensor.is_sharded());
     tt_metal::Program program{};
     const auto& device = input_tensor.device();
 
-    auto const& all_gather_config = AllGatherConfig(input_tensor, output_tensor, dim, ring_size, num_links);
+    auto const& all_gather_config = AllGatherConfig(input_tensor, output_tensor, dim, ring_size, num_links, topology);
     auto const& sharding_info = ShardedAllGatherConfig(input_tensor, output_tensor, dim);
 
     all_gather_config.print();
@@ -1362,9 +1333,9 @@ operation::ProgramWithCallbacks all_gather_full_shard_grid(const Tensor& input_t
 
     for (uint32_t l = 0; l < num_links; ++l) {
         // Get the cores for the sender and receiver worker cores
-        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id).at(sender_socket_idx + l);
+        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id.value()).at(sender_socket_idx + l);
         eth_sender_cores.push_back(eth_sender_core);
-        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id).at(receiver_socket_idx + l);
+        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id.value()).at(receiver_socket_idx + l);
         eth_receiver_cores.push_back(eth_receiver_core);
     }
 
@@ -1530,9 +1501,9 @@ operation::ProgramWithCallbacks all_gather_full_shard_grid(const Tensor& input_t
         auto sender_noc = detail::GetPreferredNOCForDRAMRead(tt::Cluster::instance().arch());
         auto receiver_noc = detail::GetPreferredNOCForDRAMWrite(tt::Cluster::instance().arch());
 
-        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id).at(sender_socket_idx);
+        auto eth_sender_core = device->get_ethernet_sockets(receiver_device_id.value()).at(sender_socket_idx);
         eth_sender_cores.push_back(eth_sender_core);
-        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id).at(receiver_socket_idx);
+        auto eth_receiver_core = device->get_ethernet_sockets(sender_device_id.value()).at(receiver_socket_idx);
         eth_receiver_cores.push_back(eth_receiver_core);
 
         std::vector<uint32_t> edm_semaphores_base_address;

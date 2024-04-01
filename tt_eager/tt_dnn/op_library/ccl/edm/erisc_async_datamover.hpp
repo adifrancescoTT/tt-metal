@@ -141,6 +141,9 @@ class ChannelBuffer final {
 
                 noc_semaphore_inc(worker_semaphore_address, 1);
                 this->worker_index.worker_index++;
+                if (this->worker_index.worker_index >= this->num_workers) {
+                    this->worker_index.worker_index = 0;
+                }
         } else {
             ASSERT(false); // Not implemented
         }
