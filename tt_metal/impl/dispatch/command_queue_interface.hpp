@@ -35,6 +35,8 @@ constexpr uint32_t PREFETCH_D_BUFFER_BLOCKS = 4;
 // 764 to make this not divisible by 3 so we can test wrapping of dispatch buffer
 constexpr uint32_t DISPATCH_BUFFER_BLOCK_SIZE_PAGES = 764 * 1024 / (1 << DISPATCH_BUFFER_LOG_PAGE_SIZE) / DISPATCH_BUFFER_SIZE_BLOCKS;
 
+static constexpr uint32_t EVENT_PADDED_SIZE = 16;
+
 // Starting L1 address of commands
 inline uint32_t get_dispatch_buffer_base(bool use_eth_l1) {
     uint32_t dispatch_buffer_base_addr = use_eth_l1 ? ERISC_L1_UNRESERVED_BASE : L1_UNRESERVED_BASE;
@@ -51,41 +53,6 @@ inline uint32_t get_eth_command_start_l1_address(SyncCBConfigRegion cq_region) {
         TT_ASSERT(false, "Unsupported router CB config");
         return 0;
     }
-}
-
-// Where issue queue interface core pulls in data (follows command)
-inline uint32_t get_data_section_l1_address(bool use_eth_l1, bool use_idle_eth) {
-    if (use_eth_l1) {
-        if (use_idle_eth) {
-            return L1_UNRESERVED_BASE + DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-        } else {
-            return eth_l1_mem::address_map::ERISC_L1_UNRESERVED_BASE + DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-        }
-    } else {
-        return L1_UNRESERVED_BASE + DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-    }
-}
-
-inline uint32_t get_cq_data_buffer_size(bool use_eth_l1, bool use_idle_eth) {
-    if (use_eth_l1) {
-        if (use_idle_eth) {
-            return MEM_ETH_SIZE - L1_UNRESERVED_BASE -  DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-        } else {
-            return eth_l1_mem::address_map::ERISC_L1_TUNNEL_BUFFER_SIZE - DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-        }
-    } else {
-        return MEM_L1_SIZE - L1_UNRESERVED_BASE -  DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND;
-    }
-}
-
-// Space available in command_queue_consumer
-inline uint32_t get_consumer_data_buffer_size() {
-    uint32_t num_consumer_cmd_slots = 2;
-    uint32_t producer_data_buffer_size = get_cq_data_buffer_size(false, false);
-    uint32_t consumer_data_buffer_size = (producer_data_buffer_size - DeviceCommand::NUM_BYTES_IN_DEVICE_COMMAND) / num_consumer_cmd_slots;
-    // The data buffer size needs to maintain DRAM/PCIe alignment
-    consumer_data_buffer_size -= consumer_data_buffer_size % DRAM_ALIGNMENT;
-    return consumer_data_buffer_size;
 }
 
 /// @brief Get offset of the command queue relative to its channel
