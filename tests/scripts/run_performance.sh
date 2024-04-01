@@ -88,6 +88,10 @@ run_device_perf_models() {
 
     env pytest models/demos/resnet/tests -m $test_marker
 
+    if [ "$test_maker" == "models_device_performance_bare_metal" ]; then
+        env pytest models/experimental/functional_stable_diffusion/tests -m $test_maker
+    fi
+
     env pytest models/demos/metal_BERT_large_11/tests -m $test_marker
 
     env pytest models/demos/ttnn_falcon7b/tests -m $test_marker
