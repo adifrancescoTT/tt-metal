@@ -5,19 +5,8 @@
 import ttnn
 import torch
 from models.utility_functions import (
-    is_wormhole_b0,
     is_grayskull,
-    pad_and_fold_conv_filters_for_unity_stride,
     pad_and_fold_conv_activation_for_unity_stride,
-)
-
-from ttnn.model_preprocessing import (
-    preprocess_model,
-    preprocess_conv2d,
-    fold_batch_norm2d_into_conv2d,
-    fold_conv7s2_into_conv4s1,
-    preprocess_remaining_children_and_parameters,
-    convert_torch_model_to_ttnn_model,
 )
 
 hardcoded_matmul_config_linear = {
@@ -71,21 +60,17 @@ def ResnetLinear(
     """
     Returns a function for linear operation in resnet with bias.
     """
-    if bias is not None:
-        assert bias.get_legacy_shape()[-1] == out_features, "bias shape is not as expected"
-        if device is not None:
-            bias = bias.to(device)
-    assert weight.get_legacy_shape() == [1, 1, in_features, out_features], "weight does not have the expected shape"
-    weight_T = weight
-    if device is not None:
-        weight_T = weight_T.to(device)
 
     matmul_config = hardcoded_matmul_config_linear[batch_size]
+    weight_shape = weight.get_legacy_shape()
+    weight = weight.reshape(1, 1, weight_shape[-2], weight_shape[-1])
+    bias_shape = bias.get_legacy_shape()
+    bias = bias.reshape(1, 1, bias_shape[-2], bias_shape[-1])
 
     def linear_(act):
         output = ttnn.experimental.operations.primary.matmul_1d(
             act,
-            weight_T,
+            weight,
             bias=bias,
             program_config=matmul_config,
             output_mem_config=output_mem_config,
@@ -142,18 +127,6 @@ class resnet50Bottleneck:
         self.model_config = model_config
         self.output_memory_config = sharded_memory_config_type if module_out_sharded else ttnn.L1_MEMORY_CONFIG
         self.out_in_place = module_out_sharded
-        parameters.conv1.weight, parameters.conv1.bias = permute_conv_weights(
-            parameters.conv1.weight, parameters.conv1.bias
-        )
-        parameters.conv2.weight, parameters.conv2.bias = permute_conv_weights(
-            parameters.conv2.weight, parameters.conv2.bias
-        )
-        parameters.conv3.weight, parameters.conv3.bias = permute_conv_weights(
-            parameters.conv3.weight, parameters.conv3.bias
-        )
-        parameters.conv1.weight, parameters.conv1.bias = fold_batch_norm2d_into_conv2d(parameters.conv1, parameters.bn1)
-        parameters.conv2.weight, parameters.conv2.bias = fold_batch_norm2d_into_conv2d(parameters.conv2, parameters.bn2)
-        parameters.conv3.weight, parameters.conv3.bias = fold_batch_norm2d_into_conv2d(parameters.conv3, parameters.bn3)
 
         conv1_in_channels = parameters.conv1.weight.shape[1]
 
@@ -179,8 +152,23 @@ class resnet50Bottleneck:
                 fp32_dest_acc_en=False,
                 packer_l1_acc=False,
             )
+        parameters.conv1.weight = ttnn.from_device(parameters.conv1.weight)
+        parameters.conv1.bias = ttnn.from_device(parameters.conv1.bias)
         out_channels = parameters.conv1.weight.shape[0]
         in_channels = parameters.conv1.weight.shape[1]
+        conv1_config_override = {}
+        # for module with stride == 2 (not 1), conv1 output shape != downsample output shape
+        # the shard config calculated for conv1 will be different from downsample
+        #  override conv1 shard config to use downsample shard config
+        if stride == 2:
+            assert downsample is not None
+            ds_parallel_config = downsample.conv.get_parallelization_config()
+            conv1_config_override = {
+                "grid_size": (ds_parallel_config.grid_size.x, ds_parallel_config.grid_size.y),
+                "per_core_out_matrix_height": ds_parallel_config.per_core_out_matrix_height_ntiles * 32,
+                "per_core_weight_matrix_width": ds_parallel_config.per_core_out_matrix_width_ntiles * 32,
+                "num_cores_nhw": ds_parallel_config.num_cores_nhw,
+            }
         self.conv1 = ttnn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -198,7 +186,7 @@ class resnet50Bottleneck:
             bias=parameters.conv1.bias,
             math_fidelity=model_config["MATH_FIDELITY"],
             weights_dtype=model_config["WEIGHTS_DTYPE"],
-            conv_blocking_and_parallelization_config_override={},
+            conv_blocking_and_parallelization_config_override=conv1_config_override,
             compute_kernel_config=compute_kernel_config,
             activation="relu",
         )
@@ -208,6 +196,8 @@ class resnet50Bottleneck:
             self.module_input_shape[0] == 20 and self.module_input_shape[1] == 56 and self.module_input_shape[3] == 256
         ):
             move_utwh_output = True
+        parameters.conv2.weight = ttnn.from_device(parameters.conv2.weight)
+        parameters.conv2.bias = ttnn.from_device(parameters.conv2.bias)
         out_channels = parameters.conv2.weight.shape[0]
         in_channels = parameters.conv2.weight.shape[1]
         self.conv2 = ttnn.Conv2d(
@@ -236,6 +226,8 @@ class resnet50Bottleneck:
 
         input_height = ((int)((input_height - 1) / stride)) + 1
         input_width = ((int)((input_width - 1) / stride)) + 1
+        parameters.conv3.weight = ttnn.from_device(parameters.conv3.weight)
+        parameters.conv3.bias = ttnn.from_device(parameters.conv3.bias)
         out_channels = parameters.conv3.weight.shape[0]
         in_channels = parameters.conv3.weight.shape[1]
         self.conv3 = ttnn.Conv2d(
@@ -258,10 +250,15 @@ class resnet50Bottleneck:
             conv_blocking_and_parallelization_config_override={},
             compute_kernel_config=compute_kernel_config,
         )
+        assert self.conv1.conv.output_sharded_memory_config == self.conv2.conv.input_sharded_memory_config
+        assert self.conv2.conv.output_sharded_memory_config == self.conv3.conv.input_sharded_memory_config
+        if downsample is not None:
+            assert downsample.conv.input_sharded_memory_config == self.conv1.conv.input_sharded_memory_config
+            assert downsample.conv.output_sharded_memory_config == self.conv3.conv.output_sharded_memory_config
         self.module_output_height = input_height
         self.module_output_width = input_width
 
-    def resnet50_bottleneck_block(self, x):
+    def __call__(self, x):
         # logger.info("This module input shape - ", self.module_input_shape)
         # conv1 is 1x1 conv
         # logger.info("Running conv1")
@@ -282,7 +279,6 @@ class resnet50Bottleneck:
             ds_out = self.downsample_or_noop(x)
             if self.deallocate:
                 ttnn.deallocate(x)
-
         out = ttnn.add_and_apply_activation(
             out, ds_out, activation="relu", memory_config=self.output_memory_config, out_in_place=self.out_in_place
         )
@@ -323,11 +319,8 @@ class resnet50:
                 fp32_dest_acc_en=False,
                 packer_l1_acc=False,
             )
-        parameters.conv1.weight, parameters.conv1.bias = permute_conv_weights(
-            parameters.conv1.weight, parameters.conv1.bias
-        )
-        parameters.conv1.weight, parameters.conv1.bias = fold_batch_norm2d_into_conv2d(parameters.conv1, parameters.bn1)
-        parameters.conv1.weight = pad_and_fold_conv_filters_for_unity_stride(parameters.conv1.weight, 2, 2)
+        parameters.conv1.weight = ttnn.from_device(parameters.conv1.weight)
+        parameters.conv1.bias = ttnn.from_device(parameters.conv1.bias)
         out_channels = parameters.conv1.weight.shape[0]
         in_channels = parameters.conv1.weight.shape[1]
         self.conv1 = ttnn.Conv2d(
@@ -359,7 +352,7 @@ class resnet50:
         self.max_pool = ttnn.MaxPool2d(
             kernel_size=(3, 3),
             stride=(2, 2),
-            pad=(1, 1),
+            padding=(1, 1),
             dilation=(1, 1),
             dtype=ttnn.bfloat16,
             device=self.device,
@@ -369,7 +362,7 @@ class resnet50:
             reader_patterns_cache=self.max_pool_reader_patterns_cache,
         )
         self.layer1, self.layer1_output_height, self.layer1_output_width = self._make_layer(
-            parameters=parameters,
+            parameters=parameters.layer1,
             planes=64,
             blocks=layers[0],
             stride=1,
@@ -383,7 +376,7 @@ class resnet50:
             conv_2d=False,
         )
         self.layer2, self.layer2_output_height, self.layer2_output_width = self._make_layer(
-            parameters=parameters,
+            parameters=parameters.layer2,
             planes=128,
             blocks=layers[1],
             stride=2,
@@ -397,7 +390,7 @@ class resnet50:
             conv_2d=False,
         )
         self.layer3, self.layer3_output_height, self.layer3_output_width = self._make_layer(
-            parameters=parameters,
+            parameters=parameters.layer3,
             planes=256,
             blocks=layers[2],
             stride=2,
@@ -411,7 +404,7 @@ class resnet50:
             conv_2d=True,
         )
         self.layer4, self.layer4_output_height, self.layer4_output_width = self._make_layer(
-            parameters=parameters,
+            parameters=parameters.layer4,
             planes=512,
             blocks=layers[3],
             stride=2,
@@ -483,11 +476,10 @@ class resnet50:
         conv_2d=False,
     ):
         if stride != 1 or self.inplanes != planes * resnet50Bottleneck.expansion:
-            parameters.downsample.weight, parameters.downsample.bias = fold_batch_norm2d_into_conv2d(
-                parameters.downsample, parameters.downsample
-            )
-            out_channels = parameters.downsample.weight.shape[0]
-            in_channels = parameters.downsample.weight.shape[1]
+            parameters[0].downsample.weight = ttnn.from_device(parameters[0].downsample.weight)
+            parameters[0].downsample.bias = ttnn.from_device(parameters[0].downsample.bias)
+            out_channels = parameters[0].downsample.weight.shape[0]
+            in_channels = parameters[0].downsample.weight.shape[1]
             self.downsample = ttnn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -501,8 +493,8 @@ class resnet50:
                 input_height=input_height,
                 input_width=input_width,
                 reader_patterns_cache=self.reader_patterns_cache,
-                weight=parameters.downsample.weight,
-                bias=parameters.downsample.bias,
+                weight=parameters[0].downsample.weight,
+                bias=parameters[0].downsample.bias,
                 math_fidelity=model_config["MATH_FIDELITY"],
                 weights_dtype=model_config["WEIGHTS_DTYPE"],
                 conv_blocking_and_parallelization_config_override={},
@@ -513,7 +505,7 @@ class resnet50:
         layers.append(
             resnet50Bottleneck(
                 device=self.device,
-                parameters=parameters,
+                parameters=parameters[0],
                 reader_patterns_cache=self.reader_patterns_cache,
                 batch_size=batch_size,
                 input_height=input_height,
@@ -534,12 +526,12 @@ class resnet50:
             layers.append(
                 resnet50Bottleneck(
                     device=self.device,
-                    parameters=parameters,
+                    parameters=parameters[block_num],
                     reader_patterns_cache=self.reader_patterns_cache,
                     batch_size=batch_size,
                     input_height=input_height,
                     input_width=input_width,
-                    stride=stride,
+                    stride=1,
                     sharded_memory_config_type=sharded_memory_config_type,
                     model_config=model_config,
                     conv_2d=conv_2d,
@@ -572,7 +564,7 @@ class resnet50:
         input_tensor = ttnn.from_torch(input_tensor, dtype=ttnn.bfloat16)
         return input_tensor
 
-    def __call__(self, torch_input_tensor) -> ttnn.tensor:
+    def __call__(self, torch_input_tensor) -> ttnn.Tensor:
         input_tensor = self.preprocessing(torch_input_tensor)
         ## copy input to device sharded directly
         x = ttnn.to_device(input_tensor, device=self.device, memory_config=self.conv1.conv.input_sharded_memory_config)
@@ -583,7 +575,7 @@ class resnet50:
         if self.batch_size == 20:
             x = ttnn.experimental.tensor.move_sharded(x)
 
-        x = self.maxpool(x)
+        x = self.max_pool(x)
 
         x = ttnn.reshape(x, (1, 1, 56 * 56 * self.batch_size, 64))
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, dtype=self.model_config["ACTIVATIONS_DTYPE"])
@@ -620,24 +612,39 @@ class resnet50:
             x,
             (0, 0, 0, 0),
             (unpadded_shape[0] - 1, unpadded_shape[1] - 1, unpadded_shape[2] - 1, unpadded_shape[3] - 1),
-            self.memory_config,
+            ttnn.L1_MEMORY_CONFIG,
         )
 
-        x = x.reshape(
-            self.batch_size,
-            x.get_legacy_shape()[1],
-            (int)(x.get_legacy_shape()[2] / self.batch_size),
-            x.get_legacy_shape()[3],
-        )
-        grid_size = (8, 4)
-        x = ttnn.experimental.tensor.interleaved_to_sharded(
+        x = ttnn.reshape(
             x,
-            grid_size,
-            [x.volume() // x.get_legacy_shape()[-1], x.get_legacy_shape()[-1] // (grid_size[0] * grid_size[1])],
-            ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-            ttnn.ShardOrientation.ROW_MAJOR,
+            (
+                self.batch_size,
+                x.get_legacy_shape()[1],
+                (int)(x.get_legacy_shape()[2] / self.batch_size),
+                x.get_legacy_shape()[3],
+            ),
         )
 
+        grid_size = (8, 4)
+        shard_grid = ttnn.experimental.tensor.CoreRangeSet(
+            {
+                ttnn.experimental.tensor.CoreRange(
+                    ttnn.experimental.tensor.CoreCoord(0, 0),
+                    ttnn.experimental.tensor.CoreCoord(grid_size[0] - 1, grid_size[1] - 1),
+                )
+            }
+        )
+        shard_shape = [
+            x.volume() // x.get_legacy_shape()[-1],
+            x.get_legacy_shape()[-1] // (grid_size[0] * grid_size[1]),
+        ]
+        shard_spec = ttnn.experimental.tensor.ShardSpec(
+            shard_grid, shard_shape, ttnn.experimental.tensor.ShardOrientation.ROW_MAJOR, False
+        )
+        width_sharded_mem_config = ttnn.types.MemoryConfig(
+            ttnn.types.TensorMemoryLayout.WIDTH_SHARDED, ttnn.types.BufferType.L1, shard_spec
+        )
+        x = ttnn.to_memory_config(x, width_sharded_mem_config)
         unpadded_shape = x.get_legacy_shape()
         padded_shape = [
             unpadded_shape[0],
@@ -667,7 +674,7 @@ class resnet50:
         )
 
         x = ttnn.reshape(
-            x, 1, x.get_legacy_shape()[1], self.batch_size * x.get_legacy_shape()[2], x.get_legacy_shape()[3]
+            x, (1, x.get_legacy_shape()[1], self.batch_size * x.get_legacy_shape()[2], x.get_legacy_shape()[3])
         )
 
         unpadded_shape = x.get_legacy_shape()
@@ -694,14 +701,16 @@ class resnet50:
             x,
             [0, 0, 0, 0],
             (desired_shape[0] - 1, desired_shape[1] - 1, desired_shape[2] - 1, desired_shape[3] - 1),
-            self.L1_MEMORY_CONFIG,
+            ttnn.L1_MEMORY_CONFIG,
         )
         x = ttnn.reshape(
             x,
-            self.batch_size,
-            x.get_legacy_shape()[1],
-            (int)(x.get_legacy_shape()[2] / self.batch_size),
-            x.get_legacy_shape()[3],
+            (
+                self.batch_size,
+                x.get_legacy_shape()[1],
+                (int)(x.get_legacy_shape()[2] / self.batch_size),
+                x.get_legacy_shape()[3],
+            ),
         )
 
         return x

@@ -23,10 +23,10 @@ from ttnn.model_preprocessing import (
 
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.utility_functions import (
-    skip_for_wormhole_b0,
-    pad_and_fold_conv_activation_for_unity_stride,
     is_wormhole_b0,
     is_grayskull,
+    pad_and_fold_conv_filters_for_unity_stride,
+    pad_and_fold_conv_activation_for_unity_stride,
 )
 
 from models.experimental.functional_resnet.tt.ttnn_functional_resnet50 import resnet50
@@ -37,12 +37,43 @@ def preprocess_conv_parameter(parameter, *, dtype):
     return parameter
 
 
-def custom_preprocessor(model, name):
+def custom_preprocessor(model, name, ttnn_module_args, convert_to_ttnn):
     parameters = {}
-    if isinstance(model, torch.nn.Conv2d):
-        weight = torch.permute(model.weight, (2, 3, 0, 1))
-        parameters["weight"] = preprocess_conv_parameter(weight, dtype=ttnn.bfloat16)
-        parameters["bias"] = preprocess_conv_parameter(model.bias, dtype=ttnn.bfloat16)
+    if isinstance(model, torchvision.models.resnet.Bottleneck):
+        conv1_weight, conv1_bias = fold_batch_norm2d_into_conv2d(model.conv1, model.bn1)
+        conv2_weight, conv2_bias = fold_batch_norm2d_into_conv2d(model.conv2, model.bn2)
+        conv3_weight, conv3_bias = fold_batch_norm2d_into_conv2d(model.conv3, model.bn3)
+        parameters["conv1"] = {}
+        parameters["conv2"] = {}
+        parameters["conv3"] = {}
+        parameters["conv1"]["weight"] = ttnn.from_torch(conv1_weight)
+        parameters["conv2"]["weight"] = ttnn.from_torch(conv2_weight)
+        parameters["conv3"]["weight"] = ttnn.from_torch(conv3_weight)
+        parameters["conv1"]["bias"] = ttnn.from_torch(torch.reshape(conv1_bias, (1, 1, 1, -1)))
+        parameters["conv2"]["bias"] = ttnn.from_torch(torch.reshape(conv2_bias, (1, 1, 1, -1)))
+        parameters["conv3"]["bias"] = ttnn.from_torch(torch.reshape(conv3_bias, (1, 1, 1, -1)))
+        if model.downsample is not None:
+            downsample_weight, downsample_bias = fold_batch_norm2d_into_conv2d(model.downsample[0], model.downsample[1])
+            parameters["downsample"] = {}
+            parameters["downsample"]["weight"] = ttnn.from_torch(downsample_weight)
+            parameters["downsample"]["bias"] = ttnn.from_torch(torch.reshape(downsample_bias, (1, 1, 1, -1)))
+    elif isinstance(model, torchvision.models.resnet.ResNet):
+        conv1_weight, conv1_bias = fold_batch_norm2d_into_conv2d(model.conv1, model.bn1)
+        conv1_weight = pad_and_fold_conv_filters_for_unity_stride(conv1_weight, 2, 2)
+        parameters["conv1"] = {}
+        parameters["conv1"]["weight"] = ttnn.from_torch(conv1_weight)
+        parameters["conv1"]["bias"] = ttnn.from_torch(torch.reshape(conv1_bias, (1, 1, 1, -1)))
+        named_parameters = tuple((name, parameter) for name, parameter in model.named_parameters() if "." not in name)
+        for child_name, child in tuple(model.named_children()) + named_parameters:
+            if child_name in {"conv1", "bn1"}:
+                continue
+            parameters[child_name] = convert_torch_model_to_ttnn_model(
+                child,
+                name=name,
+                custom_preprocessor=custom_preprocessor,
+                convert_to_ttnn=convert_to_ttnn,
+                ttnn_module_args=ttnn_module_args,
+            )
     return parameters
 
 
@@ -155,11 +186,11 @@ golden_pcc = {
     "batch_size, act_dtype, weight_dtype, math_fidelity",
     (
         # (8, ttnn.bfloat16, ttnn.bfloat16, ttnn.MathFidelity.HiFi4),  ## pass
-        (8, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.LoFi),  ## pass
+        # (8, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.LoFi),  ## pass
         # (16, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.HiFi2),  ## pass
         # (16, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.LoFi),  ## pass
         # (20, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.HiFi2),  ## pass
-        # (20, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.LoFi),  ## pass
+        (20, ttnn.bfloat8_b, ttnn.bfloat8_b, ttnn.MathFidelity.LoFi),  ## pass
     ),
 )
 def test_resnet_50(device, batch_size, act_dtype, weight_dtype, math_fidelity):
@@ -189,7 +220,7 @@ def test_resnet_50(device, batch_size, act_dtype, weight_dtype, math_fidelity):
     torch_output_tensor = torch_model(torch_input_tensor)
 
     ## ttnn
-
+    # breakpoint()
     ttnn_resnet50_model = resnet50(
         device=device, parameters=parameters, batch_size=batch_size, model_config=model_config
     )
