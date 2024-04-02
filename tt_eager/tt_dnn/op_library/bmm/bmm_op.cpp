@@ -948,27 +948,50 @@ void Matmul::validate(
                 std::is_same_v<ProgramConfigType, MatmulMultiCoreReuseMultiCastProgramConfig>
             ) {
                 if (input_tensor_a.memory_config().is_sharded()) {
-                    TT_FATAL(input_tensor_a.memory_config().memory_layout == TensorMemoryLayout::BLOCK_SHARDED);
-                    if (program_config.transpose_mcast) {
-                        TT_FATAL(input_tensor_a.shard_spec().value().orientation == ShardOrientation::COL_MAJOR);
-                    } else {
-                        TT_FATAL(input_tensor_a.shard_spec().value().orientation == ShardOrientation::ROW_MAJOR);
-                    }
-                    if (this->output_mem_config.is_sharded()) {
-                        TT_FATAL(input_tensor_a.memory_config().buffer_type == this->output_mem_config.buffer_type);
-                        TT_FATAL(input_tensor_a.memory_config().memory_layout == this->output_mem_config.memory_layout);
-                    }
-
+                    auto tensor_a_memory_layout = input_tensor_a.memory_config().memory_layout;
                     uint32_t M = input_tensor_a.volume() / input_tensor_a.get_legacy_shape()[-1] / TILE_HEIGHT;
                     uint32_t K = input_tensor_a.get_legacy_shape()[-1] / TILE_WIDTH;
                     uint32_t N = input_tensor_b.get_legacy_shape()[-1] / TILE_WIDTH;
                     uint32_t per_core_M = program_config.per_core_M;
                     auto shard_shape = input_tensor_a.shard_spec().value().shape;
 
+                    TT_FATAL(
+                        tensor_a_memory_layout == TensorMemoryLayout::BLOCK_SHARDED ||
+                        tensor_a_memory_layout == TensorMemoryLayout::HEIGHT_SHARDED);
+
+                    if (tensor_a_memory_layout == TensorMemoryLayout::BLOCK_SHARDED) {
+                        if (program_config.transpose_mcast) {
+                            TT_FATAL(input_tensor_a.shard_spec().value().orientation == ShardOrientation::COL_MAJOR);
+                        } else {
+                            TT_FATAL(input_tensor_a.shard_spec().value().orientation == ShardOrientation::ROW_MAJOR);
+                        }
+                        if (this->output_mem_config.is_sharded()) {
+                            TT_FATAL(input_tensor_a.memory_config().buffer_type == this->output_mem_config.buffer_type);
+                            TT_FATAL(input_tensor_a.memory_config().memory_layout == this->output_mem_config.memory_layout);
+                        }
+
+                        TT_FATAL(K / (shard_shape[1] / TILE_WIDTH) == N / program_config.per_core_N);
+                    } else if (tensor_a_memory_layout == TensorMemoryLayout::HEIGHT_SHARDED) {
+                        TT_FATAL(K == program_config.in0_block_w);
+                        TT_FATAL(program_config.in0_block_w == (shard_shape[1] / TILE_WIDTH));
+                        TT_FATAL(
+                            input_tensor_a.shard_spec()->grid.bounding_box().start.x ==
+                            input_tensor_a.shard_spec()->grid.bounding_box().end.x);
+                    }
+
                     TT_FATAL(per_core_M == (shard_shape[0] / TILE_HEIGHT));
                     TT_FATAL((shard_shape[1] / TILE_WIDTH) % program_config.in0_block_w == 0);
-                    TT_FATAL(K / (shard_shape[1] / TILE_WIDTH) == N / program_config.per_core_N);
                 }
+
+                if (input_tensor_b.memory_config().is_sharded()) {
+                    auto tensor_b_memory_layout = input_tensor_b.memory_config().memory_layout;
+                    TT_FATAL(tensor_b_memory_layout == TensorMemoryLayout::WIDTH_SHARDED);
+                    TT_FATAL(program_config.per_core_N == (input_tensor_b.shard_spec().value().shape[0] / TILE_WIDTH));
+                    TT_FATAL(
+                        input_tensor_b.shard_spec()->grid.bounding_box().start.y ==
+                        input_tensor_b.shard_spec()->grid.bounding_box().end.y);
+                }
+
                 if (this->output_mem_config.is_sharded()) {
                     TT_FATAL(this->output_mem_config.memory_layout == TensorMemoryLayout::BLOCK_SHARDED);
                     uint32_t M = input_tensor_a.volume() / input_tensor_a.get_legacy_shape()[-1] / TILE_HEIGHT;
@@ -978,7 +1001,6 @@ void Matmul::validate(
 
                     TT_FATAL(program_config.out_subblock_w == per_core_N || program_config.out_subblock_h == 1);
                 }
-                TT_FATAL(input_tensor_b.memory_config().memory_layout == TensorMemoryLayout::INTERLEAVED);
             } else if constexpr (
                 std::is_same_v<ProgramConfigType, MatmulMultiCoreReuseProgramConfig>
             ) {
@@ -1287,11 +1309,19 @@ MatmulParallelizationStrategy Matmul::get_parallelization_strategy(const std::ve
 }
 
 Tensor matmul_1d(const Tensor &input_tensor_a, const Tensor &input_tensor_b, std::optional<const Tensor> bias, std::optional<MatmulMultiCoreReuseMultiCast1DProgramConfig> program_config, const MemoryConfig& mem_config, std::optional<const DataType> output_dtype, std::optional<const DeviceComputeKernelConfig> compute_kernel_config, bool untilize_out) {
-    if (!program_config.has_value()) {
-        program_config = bmm_op_utils::get_mcast_1d_config(input_tensor_a, input_tensor_b);
-    }
-    auto kernel_config_val = init_device_compute_kernel_config(input_tensor_a.device()->arch(), compute_kernel_config);
-    return operations::primary::matmul(input_tensor_a, input_tensor_b, bias, program_config.value(), mem_config, output_dtype, kernel_config_val, untilize_out);
+    std::vector<Tensor> output_tensors = {Tensor(input_tensor_a.get_workers())};
+    operation::launch_op(
+        [program_config, mem_config, output_dtype, compute_kernel_config, untilize_out] (const std::vector<Tensor>& input_tensors, const std::vector<std::optional<const Tensor>>& optional_input_tensors) mutable -> std::vector<Tensor> {
+            const auto& input_tensor_a = input_tensors.at(0);
+            const auto& input_tensor_b = input_tensors.at(1);
+            if (!program_config.has_value()) {
+                program_config = bmm_op_utils::get_mcast_1d_config(input_tensor_a, input_tensor_b);
+            }
+            auto kernel_config_val = init_device_compute_kernel_config(input_tensor_a.device()->arch(), compute_kernel_config);
+            return {operations::primary::matmul(input_tensor_a, input_tensor_b, optional_input_tensors.at(0), program_config.value(), mem_config, output_dtype, kernel_config_val, untilize_out)};
+        },
+    {input_tensor_a, input_tensor_b}, output_tensors, {bias});
+    return output_tensors.at(0);
 }
 
 operation::OpPerformanceModel Matmul::create_op_performance_model(

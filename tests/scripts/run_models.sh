@@ -18,7 +18,10 @@ if [[ $ARCH_NAME == "wormhole" ]]; then
 fi
 
 if [[ $ARCH_NAME == "wormhole_b0" ]]; then
-  env pytest models/demos/mistral7b/tests/test_mistral_model.py::test_mistral_model_inference[17-generative]
+  env pytest models/experimental/mamba/tests/test_full_model.py
+  env pytest models/experimental/mamba/tests_opt/test_full_model.py
+  env pytest models/experimental/mamba/tests/test_benchmarks.py
+  env pytest models/experimental/mamba/tests/test_demo.py
 fi
 
 env pytest models/experimental/whisper -k whisper_attention
@@ -78,6 +81,15 @@ env pytest models/demos/falcon7b/tests/test_falcon_end_to_end.py::test_FalconCau
 
 env pytest models/experimental/stable_diffusion/tests/test_embedding.py
 
+env pytest models/experimental/mistral/tests/test_mistral_feed_forward.py
+env pytest models/experimental/mistral/tests/test_mistral_rms_norm.py
+env pytest models/experimental/mistral/tests/test_mistral_transformer_block.py
+
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_mlp
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_rotary_embeddings
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_attention
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_decoder
+
 # GRAYSKULL ONLY
 
 if [[ $ARCH_NAME == "grayskull" ]]; then
@@ -131,6 +143,11 @@ env pytest models/experimental/nanogpt/tests -k nanogpt_model
 
 env pytest models/demos/resnet/tests/test_metal_resnet50.py::test_run_resnet50_inference[HiFi4-activations_BFLOAT16-weights_BFLOAT16-batch_1]
 env pytest models/demos/resnet/tests/test_metal_resnet50.py::test_run_resnet50_inference[HiFi4-activations_BFLOAT16-weights_BFLOAT16-batch_2]
+
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_mlp
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_rotary_embeddings
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_attention
+env pytest models/demos/ttnn_falcon7b/tests -k falcon_decoder
 
 #3524 SD gets lower PCC than FD for Resnet
 if [[ -z "$TT_METAL_SLOW_DISPATCH_MODE" ]]; then

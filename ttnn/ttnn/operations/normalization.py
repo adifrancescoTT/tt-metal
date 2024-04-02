@@ -12,7 +12,7 @@ from tt_lib.utils import find_closest_largest_divisor, find_closest_largest_divi
 import math
 
 
-def _torch_layer_norm(
+def _compute_golden_layer_norm(
     input_tensor: ttnn.Tensor, *, epsilon=1e-12, residual_input_tensor=None, weight=None, bias=None, **_
 ):
     import torch
@@ -91,7 +91,7 @@ def _layer_norm_validate_input_tensors(
 @ttnn.register_operation(
     name="ttnn.layer_norm",
     validate_input_tensors=_layer_norm_validate_input_tensors,
-    torch_function=_torch_layer_norm,
+    compute_golden=_compute_golden_layer_norm,
 )
 def layer_norm(
     input_tensor: ttnn.Tensor,
@@ -217,7 +217,8 @@ def determine_expected_group_norm_sharded_config_and_grid_size(
         num_cores_channels = 1
     else:
         num_cores_channels = device_grid_size[1]
-        num_channels_tiles = num_channels // 16
+        # num_channels_tiles = num_channels // 16
+        num_channels_tiles = num_channels // 8
         while (num_channels_tiles % num_cores_channels != 0) or (
             ((num_channels // num_cores_channels) % group_size) != 0
         ):
@@ -225,7 +226,8 @@ def determine_expected_group_norm_sharded_config_and_grid_size(
             assert num_cores_channels > 0
     input_nhw_padded_to_ncores = math.ceil(input_nhw / (num_cores_nhw * 32)) * (num_cores_nhw * 32)
     gn_in_channels_per_core = num_channels // num_cores_channels
-    assert gn_in_channels_per_core % 16 == 0
+    # assert gn_in_channels_per_core % 16 == 0
+    assert gn_in_channels_per_core % 8 == 0
     gn_nhw_per_core = input_nhw_padded_to_ncores // num_cores_nhw
     if is_height_sharded:
         grid_size = [
@@ -264,7 +266,53 @@ def create_group_norm_weight_bias_rm(input_tensor, num_channels, num_groups):
     return input_tensor.reshape(1, 1, -1, 32)
 
 
-def _torch_group_norm(input_tensor: ttnn.Tensor, *, num_groups, epsilon=1e-05, weight=None, bias=None, **_):
+def find_max_tile_span(W, group_size, tile_width):
+    current_position = 0
+    max_tile_span = 0
+
+    while current_position < W:
+        group_end = current_position + group_size
+        start_tile = current_position // tile_width
+        end_tile = (group_end - 1) // tile_width
+        current_tile_span = end_tile - start_tile + 1
+        max_tile_span = max(max_tile_span, current_tile_span)
+        current_position = group_end
+    return max_tile_span
+
+
+def create_group_norm_input_mask(num_channel, num_groups, num_cores_across_channel):
+    import torch
+
+    block_wt = find_max_tile_span(num_channel, num_channel // num_groups, 32)
+    input_mask_tensor = torch.zeros((1, num_groups, 32, int(32 * block_wt)), dtype=torch.bfloat16)
+
+    num_groups_per_core = num_groups // num_cores_across_channel
+    num_cols_per_group = num_channel // num_groups
+
+    start_strides = []
+    for _ in range(num_cores_across_channel):
+        row_offset = 0
+        start_strides.append(0)
+        for _ in range(num_groups_per_core - 1):
+            if row_offset + (num_cols_per_group % 32) == 32:
+                row_offset = 0
+            elif row_offset + (num_cols_per_group % 32) > 32:
+                row_offset = (num_cols_per_group % 32) + row_offset - 32
+            else:
+                row_offset += num_cols_per_group % 32
+            start_strides.append(row_offset)
+        end_strides = [i + num_cols_per_group for i in start_strides]
+
+    for group in range(num_groups):
+        start_stride = start_strides[group]
+        end_stride = end_strides[group]
+        end_stride = min(end_stride, input_mask_tensor.shape[3])
+        input_mask_tensor[:, group, :, start_stride:end_stride] = 1
+
+    return input_mask_tensor
+
+
+def _compute_golden_group_norm(input_tensor: ttnn.Tensor, *, num_groups, epsilon=1e-05, weight=None, bias=None, **_):
     import torch
 
     input_tensor = ttnn.from_device(input_tensor)
@@ -288,7 +336,9 @@ def _torch_group_norm(input_tensor: ttnn.Tensor, *, num_groups, epsilon=1e-05, w
 
 
 def _fallback_group_norm(input_tensor: ttnn.Tensor, *, num_groups, epsilon=1e-05, weight=None, bias=None, **_):
-    output_tensor = _torch_group_norm(input_tensor, num_groups=num_groups, epsilon=epsilon, weight=weight, bias=bias)
+    output_tensor = _compute_golden_group_norm(
+        input_tensor, num_groups=num_groups, epsilon=epsilon, weight=weight, bias=bias
+    )
     output_tensor = ttnn.from_torch(
         output_tensor, dtype=input_tensor.dtype, layout=input_tensor.layout, device=input_tensor.device()
     )
@@ -331,7 +381,7 @@ def _group_norm_validate_input_tensors(operation_name, input_tensor, *args, weig
 @ttnn.register_operation(
     name="ttnn.group_norm",
     validate_input_tensors=_group_norm_validate_input_tensors,
-    torch_function=_torch_group_norm,
+    compute_golden=_compute_golden_group_norm,
     fallback=_fallback_group_norm,
 )
 def group_norm(
@@ -339,11 +389,13 @@ def group_norm(
     *,
     num_groups: int,
     epsilon: float = 1e-12,
+    input_mask: Optional[ttnn.Tensor] = None,
     weight: Optional[ttnn.Tensor] = None,
     bias: Optional[ttnn.Tensor] = None,
     memory_config: ttnn.MemoryConfig = ttnn.DRAM_MEMORY_CONFIG,
     dtype: Optional[ttnn.DataType] = None,
     core_grid: Optional[Union[ttnn.CoreGrid, ttnn.CoreRange]] = None,
+    inplace: Optional[bool] = True,
 ) -> ttnn.Tensor:
     r"""
     group_norm(input_tensor: ttnn.Tensor, *, num_groups: int, epsilon: float = 1e-12, weight: Optional[ttnn.Tensor] = None, bias: Optional[ttnn.Tensor] = None) -> ttnn.Tensor
@@ -382,13 +434,12 @@ def group_norm(
             epsilon,
             weight,
             bias,
+            input_mask,
             output_mem_config=memory_config,
             program_config=ttl.operations.primary.GroupNormShardedMultiCoreProgramConfig(
                 compute_with_storage_grid_size=(core_grid.x, core_grid.y),
                 out_data_format=output_dtype,
-                inplace=False
-                if (input_tensor.layout == ttnn.TILE_LAYOUT and input_tensor.dtype == output_dtype)
-                else True,
+                inplace=inplace,
             ),
         )
         return output_tensor

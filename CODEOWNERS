@@ -9,6 +9,8 @@ CONTRIBUTING.md @tt-rkim
 
 CODEOWNERS @tt-rkim
 
+INSTALLING.md @tt-rkim
+
 third_party/ @tt-rkim @TT-billteng
 sfpi/ @pgkeller
 

@@ -110,8 +110,8 @@ Basic Examples
 
     torch_input_tensor = torch.rand(32, 32, dtype=torch.float32)
     input_tensor = ttnn.from_torch(torch_input_tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
-    with ttnn.enable_debug_decorator():
-        with ttnn.override_pcc_of_debug_decorator(0.9998): # This is optional in case default value of 0.9999 is too high
+    with ttnn.enable_comparison_mode():
+        with ttnn.override_pcc_of_comparison_mode(0.9998): # This is optional in case default value of 0.9999 is too high
             output_tensor = ttnn.exp(input_tensor)
     torch_output_tensor = ttnn.to_torch(output_tensor)
 
@@ -169,14 +169,17 @@ Basic Examples
 
 .. code-block:: bash
 
-    # To generate a csv with all of the operations, their attributes and their input tensors:
+    # To print currently executing ttnn operations with their durations
+    export TTNN_CONFIG_OVERRIDES='{"enable_logging": true}'
+
+    # To generate a csv with all of the ttnn and tt_lib operations, their attributes and their input tensors:
     export OPERATION_HISTORY_CSV=operation_history.csv
 
-    # To print the currently executing operation and its input tensors to stdout
+    # To print the currently executing ttnn and tt_lib operation and its input tensors to stdout
     export TT_METAL_LOGGER_TYPES=Op
     export TT_METAL_LOGGER_LEVEL=Debug
 
-Logging cannot provide duration because the operations run asynchronously.
+Logging is not a substitute for profiling.
 Please refer to :doc:`Profiling ttnn Operations </ttnn/profiling_ttnn_operations>` for instructions on how to profile operations.
 
 
@@ -250,16 +253,32 @@ The following environment variable can be set in order to completely disable the
 
 .. code-block:: bash
 
-    export TTNN_ENABLE_FAST_RUNTIME_MODE=True
+    export TTNN_CONFIG_OVERRIDES='{"enable_fast_runtime_mode": true}'
 
 
 
-12. Print L1 Buffers
---------------------
+12. Visualize using Web Browser
+-------------------------------
 
-ttnn has a python decorator that optionally enables features during run-time. The features are related to validation and debugging of the operations.
+Set the following environment variables as needed
 
-The following environment variable can be set in order to completely disable these features.
+.. code-block:: bash
+
+    # enable_logging - Synchronize main thread after every operation and log the operation start, end and duration
+    # enable_detailed_buffer_report (optional) - Enable it to visualize the detailed buffer report after every operation
+    # enable_graph_report (optional) - Enable it to visualize the graph after every operation
+    # enable_tensor_report (optional) - Enable it to visualize the input and output tensors of every operation
+    # enable_comparison_mode (optional) - Enable it to test the output of operations against their golden implementaiton
+
+    export TTNN_CONFIG_OVERRIDES='{
+        "enable_logging": true,
+        "enable_graph_report": true,
+        "enable_detailed_buffer_report": true,
+        "enable_tensor_report": true,
+        "enable_comparison_mode": true
+    }'
+
+Run the code. i.e.:
 
 .. code-block:: python
 
@@ -269,13 +288,25 @@ The following environment variable can be set in order to completely disable the
     device_id = 0
     device = ttnn.open_device(device_id=device_id)
 
-    torch_input_tensor = torch.rand(1, 1, 2, 4, dtype=torch.float32)
-    input_tensor = ttnn.from_torch(torch_input_tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
-    output_tensor = ttnn.exp(input_tensor, memory_config=ttnn.L1_MEMORY_CONFIG)
+    torch_input_tensor_a = torch.rand(2048, 2048, dtype=torch.float32)
+    torch_input_tensor_b = torch.rand(2048, 2048, dtype=torch.float32)
+    input_tensor_a = ttnn.from_torch(torch_input_tensor_a, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+    input_tensor_b = ttnn.from_torch(torch_input_tensor_b, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    output_tensor = ttnn.add(input_tensor_a, input_tensor_b, memory_config=ttnn.L1_MEMORY_CONFIG)
+    ttnn.deallocate(input_tensor_a)
+    ttnn.deallocate(input_tensor_b)
+
     torch_output_tensor = ttnn.to_torch(output_tensor)
-    ttnn.print_l1_buffers()
+    ttnn.deallocate(output_tensor)
 
     ttnn.close_device(device)
+
+Open the visualizer by running the following command:
+
+.. code-block:: bash
+
+    flask --app ttnn/visualizer run
 
 
 
@@ -313,3 +344,15 @@ The following environment variable can be set in order to completely disable the
 
     import ttnn
     ttnn.query_operations()
+
+
+
+15. Disable Fallbacks
+---------------------
+
+Fallbacks are used when the operation is not supported by the device. The fallbacks are implemented in the host and are slower than the device operations.
+The user will be notified when a fallback is used. The fallbacks can be disabled by setting the following environment variable.
+
+.. code-block:: bash
+
+     export TTNN_THROW_EXCEPTION_ON_FALLBACK=True
