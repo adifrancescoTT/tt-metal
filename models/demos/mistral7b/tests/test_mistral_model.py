@@ -32,6 +32,7 @@ class Emb(torch.nn.Module):
 
 
 @skip_for_grayskull("Requires wormhole_b0 to run")
+@pytest.mark.models_performance_bare_metal
 @pytest.mark.parametrize(
     "version",
     (
@@ -41,10 +42,7 @@ class Emb(torch.nn.Module):
 )
 @pytest.mark.parametrize(
     "iterations",
-    (
-        1,
-        17,
-    ),
+    (17,),
 )
 def test_mistral_model_inference(device, iterations, version, use_program_cache):
     if version == "generative":
