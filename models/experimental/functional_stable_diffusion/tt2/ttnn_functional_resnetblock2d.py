@@ -422,7 +422,7 @@ class resnetBlock2D:
             output_tensor_end_width_dim = split_input_channels
             for i in range(conv1_split_chunks):
                 split_hidden_states.append(
-                    ttl.tensor.unpad(
+                    ttnn.experimental.tensor.unpad(
                         hidden_states,
                         [0, 0, 0, output_tensor_start_width_dim],
                         [

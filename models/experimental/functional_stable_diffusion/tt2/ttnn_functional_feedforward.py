@@ -34,15 +34,16 @@ class feedforward:
         self.parameters = parameters
         self.parameters.net[2].bias = ttnn.unsqueeze_to_4D(self.parameters.net[2].bias)
         self.geglu = geglu(device, parameters.net[0])
-        self.block_sharded_memory_config = ttl.tensor.MemoryConfig(
-            memory_layout=ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED, buffer_type=ttl.tensor.BufferType.L1
+        self.block_sharded_memory_config = ttnn.experimental.tensor.MemoryConfig(
+            memory_layout=ttnn.experimental.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+            buffer_type=ttnn.experimental.tensor.BufferType.L1,
         )
-        self.l1_interleaved_memory_config = ttl.tensor.MemoryConfig(
-            memory_layout=ttl.tensor.TensorMemoryLayout.INTERLEAVED,
-            buffer_type=ttl.tensor.BufferType.L1,
+        self.l1_interleaved_memory_config = ttnn.experimental.tensor.MemoryConfig(
+            memory_layout=ttnn.experimental.tensor.TensorMemoryLayout.INTERLEAVED,
+            buffer_type=ttnn.experimental.tensor.BufferType.L1,
         )
-        self.compute_kernel_config = ttl.tensor.WormholeComputeKernelConfig(
-            math_fidelity=ttl.tensor.MathFidelity.LoFi,
+        self.compute_kernel_config = ttnn.experimental.tensor.WormholeComputeKernelConfig(
+            math_fidelity=ttnn.experimental.tensor.MathFidelity.LoFi,
             math_approx_mode=True,
             fp32_dest_acc_en=False,
             packer_l1_acc=False,
@@ -61,7 +62,7 @@ class feedforward:
         Nt = N // 32
         G = grid_size[1]
         per_core_N = (Nt - 1) // (G - 1) if Nt != 16 else 4
-        program_config = ttl.operations.primary.MatmulMultiCoreReuseMultiCastProgramConfig(
+        program_config = ttnn.experimental.operations.primary.MatmulMultiCoreReuseMultiCastProgramConfig(
             compute_with_storage_grid_size=grid_size,
             in0_block_w=K // grid_size[1] // 32,
             out_subblock_h=1,
@@ -73,7 +74,7 @@ class feedforward:
         )
         if hidden_states.shape[-2] == 8192:
             hidden_states = ttnn.reallocate(hidden_states)
-        hidden_states = ttl.operations.primary.matmul(
+        hidden_states = ttnn.experimental.operations.primary.matmul(
             hidden_states,
             self.parameters.net[2].weight,
             bias=self.parameters.net[2].bias,
@@ -81,15 +82,15 @@ class feedforward:
             output_mem_config=self.l1_interleaved_memory_config
             if interleaved_output
             else self.block_sharded_memory_config,
-            output_dtype=ttl.tensor.DataType.BFLOAT8_B,
+            output_dtype=ttnn.experimental.tensor.DataType.BFLOAT8_B,
             compute_kernel_config=self.compute_kernel_config,
         )
         if interleaved_output:
-            hidden_states = ttl.tensor.interleaved_to_sharded(
+            hidden_states = ttnn.experimental.tensor.interleaved_to_sharded(
                 hidden_states,
                 grid_size,
                 [hidden_states.shape[-2] // grid_size[0], hidden_states.shape[-1] // grid_size[1]],
-                ttl.tensor.TensorMemoryLayout.BLOCK_SHARDED,
-                ttl.tensor.ShardOrientation.COL_MAJOR,
+                ttnn.experimental.tensor.TensorMemoryLayout.BLOCK_SHARDED,
+                ttnn.experimental.tensor.ShardOrientation.COL_MAJOR,
             )
         return hidden_states

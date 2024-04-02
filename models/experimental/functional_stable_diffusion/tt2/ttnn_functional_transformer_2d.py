@@ -257,7 +257,7 @@ class transformer_2d_model:
                 hidden_states, (self.batch_size, 1, self.input_height * self.input_width, in_channels)
             )
             if ttnn.get_memory_config(hidden_states) != self.gn_expected_input_sharded_memory_config:
-                # hidden_states = ttl.tensor.reshard(hidden_states, self.gn_expected_input_sharded_memory_config)
+                # hidden_states = ttnn.experimental.tensor.reshard(hidden_states, self.gn_expected_input_sharded_memory_config)
                 hidden_states = ttnn.to_memory_config(hidden_states, ttnn.L1_MEMORY_CONFIG)
                 hidden_states = ttnn.to_memory_config(hidden_states, self.gn_expected_input_sharded_memory_config)
             hidden_states = ttnn.group_norm(
@@ -276,11 +276,11 @@ class transformer_2d_model:
         hidden_states = ttnn.to_memory_config(
             hidden_states, ttnn.L1_MEMORY_CONFIG
         )  # sharded to interleaved since we can't tilize block sharded
-        hidden_states = ttl.tensor.tilize(
+        hidden_states = ttnn.experimental.tensor.tilize(
             hidden_states,
             output_mem_config=hidden_states.memory_config(),
             use_multicore=True,
-            output_dtype=ttl.tensor.DataType.BFLOAT8_B,
+            output_dtype=ttnn.experimental.tensor.DataType.BFLOAT8_B,
         )
 
         hidden_states = self.proj_in(hidden_states)

@@ -66,7 +66,7 @@ class basic_transformer_block:
             assert False, "AdaLayerNormZero not supported and not used in stable diffusion"
 
         sharded_mem_cfg = ttnn.get_memory_config(hidden_states)
-        program_config = ttl.operations.primary.LayerNormShardedMultiCoreProgramConfig(
+        program_config = ttnn.experimental.operations.primary.LayerNormShardedMultiCoreProgramConfig(
             compute_with_storage_grid_size=(8, 8),
             subblock_w=1,
             block_h=sharded_mem_cfg.shard_spec.shape[0] // 32,
@@ -102,7 +102,7 @@ class basic_transformer_block:
 
         if attn_output.memory_config() != hidden_states.memory_config():
             if attn_output.memory_config().is_sharded():
-                attn_output = ttl.tensor.reshard(attn_output, hidden_states.memory_config())
+                attn_output = ttnn.experimental.tensor.reshard(attn_output, hidden_states.memory_config())
             else:
                 attn_output = ttnn.to_memory_config(attn_output, hidden_states.memory_config())
         sum = ttnn.add(attn_output, hidden_states, memory_config=hidden_states.memory_config())
@@ -134,7 +134,7 @@ class basic_transformer_block:
             )
             if attn_output.memory_config() != hidden_states.memory_config():
                 if attn_output.memory_config().is_sharded():
-                    attn_output = ttl.tensor.reshard(attn_output, hidden_states.memory_config())
+                    attn_output = ttnn.experimental.tensor.reshard(attn_output, hidden_states.memory_config())
                 else:
                     attn_output = ttnn.to_memory_config(attn_output, hidden_states.memory_config())
             sum = ttnn.add(attn_output, hidden_states, memory_config=hidden_states.memory_config())
