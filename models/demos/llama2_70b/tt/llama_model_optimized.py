@@ -203,13 +203,15 @@ class TtLlamaModel_optimized(nn.Module):
             )
             attn_mask = torch.full((seq_len, seq_len), torch.finfo(torch.float32).min)
             attn_mask = torch.triu(attn_mask, diagonal=1)
-            if valid_seq_len is not None:
+            if valid_seq_len:
                 attn_mask[:, valid_seq_len:] = torch.finfo(
                     attn_mask.dtype
                 ).min  # Mask columns beyond valid_seq_len as padding
                 attn_mask[valid_seq_len:, :] = torch.finfo(
                     attn_mask.dtype
                 ).min  # Mask rows beyond valid_seq_len as padding
+            else:
+                valid_seq_len = seq_len
             attn_mask = attn_mask.expand(batch, self.n_local_heads, -1, -1)
 
             as_tensor = lambda tensor, name, device_id: ttnn.as_tensor(
@@ -239,7 +241,7 @@ class TtLlamaModel_optimized(nn.Module):
                 )
                 cos_gathereds.append(as_tensor(cos_gathered.clone(), f"cos_gathered_prefill_{seq_len}", i))
                 sin_gathereds.append(as_tensor(sin_gathered.clone(), f"sin_gathered_prefill_{seq_len}", i))
-                attn_masks.append(as_tensor(attn_mask.clone(), f"attn_mask_prefill_{seq_len}", i))
+                attn_masks.append(as_tensor(attn_mask.clone(), f"attn_mask_prefill_{valid_seq_len}_{seq_len}", i))
             rot_mats = [cos_gathereds, sin_gathereds]
 
         elif self.model_config["LLM_MODE"] == "decode":
